@@ -1,10 +1,17 @@
-streamlit
-pandas
-geopandas
-shapely
-fiona
-folium
-streamlit-folium
+streamlit>=1.32
+pandas>=2.1
+geopandas>=0.14
+shapely>=2.0
+fiona>=1.9
+pyproj>=3.6
+rtree>=1.2.0
+folium>=0.15
+streamlit-folium>=0.18
+
+# Google Sheets
+gspread>=6.0.0
+google-auth>=2.22.0
+
 
 
 

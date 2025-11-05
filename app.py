@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Casos de Éxito – Capas, edición/mover, Heatmap, Dashboard, Filtros Prov→Cantón (catálogo CR) y Google Sheets.
+# Casos de Éxito – Mapa por capas (CR) + Edición/Mover + Heatmap + Dashboard + Export + Google Sheets
 # Ejecuta: streamlit run app.py
 
 import io, json, zipfile, tempfile, re, datetime as dt, uuid
@@ -15,16 +15,7 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw, MeasureControl, MiniMap, HeatMap, BeautifyIcon
 
-# ====== Opcional: Google Sheets ======
-HAS_SHEETS = False
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-    HAS_SHEETS = True
-except Exception:
-    HAS_SHEETS = False
-
-# ==================== Catálogo Costa Rica ====================
+# ==================== Catálogo Costa Rica (Provincia → Cantón) ====================
 CR_CATALOG: Dict[str, List[str]] = {
     "San José": [
         "San José","Escazú","Desamparados","Puriscal","Tarrazú","Aserrí","Mora",
@@ -210,7 +201,6 @@ with tab_mapa:
     desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.", key="desc_map")[:240]
 
     d2a, d2b, d2c = st.columns([1,1,1])
-    # Prefill según selector
     prov_prefill = provincia_f if provincia_f != "(todas)" else "San José"
     cant_prefill = (canton_f if canton_f != "(todos)" else (CR_CATALOG[prov_prefill][0] if prov_prefill in CR_CATALOG else "Montes de Oca"))
     with d2a: provincia = st.text_input("Provincia", prov_prefill, key="prov_in_form_map")
@@ -356,11 +346,14 @@ with tab_mapa:
                         resp = st.selectbox("Responsable", ["GL","FP","Mixta"],
                                             index=["GL","FP","Mixta"].index(p.get("responsable","GL")),
                                             key=f"resp_edit_{lname}")
-                        prov = st.selectbox("Provincia (catálogo)", list(CR_CATALOG.keys()),
-                                            index=max(0, list(CR_CATALOG.keys()).index(p.get("provincia","San José"))), key=f"prov_edit_{lname}")
-                        cant = st.selectbox("Cantón (catálogo)", CR_CATALOG.get(prov, []),
-                                            index=max(0, CR_CATALOG.get(prov, []).index(p.get("canton", CR_CATALOG.get(prov, [''])[0]))),
-                                            key=f"cant_edit_{lname}")
+                        # Cascada usando catálogo CR
+                        provs = list(CR_CATALOG.keys())
+                        prov_idx = provs.index(p.get("provincia","San José")) if p.get("provincia","San José") in provs else 0
+                        prov = st.selectbox("Provincia (catálogo)", provs, index=prov_idx, key=f"prov_edit_{lname}")
+                        cant_list = CR_CATALOG.get(prov, [])
+                        cant_val = p.get("canton", cant_list[0] if cant_list else "")
+                        cant_idx = cant_list.index(cant_val) if cant_val in cant_list else 0
+                        cant = st.selectbox("Cantón (catálogo)", cant_list, index=cant_idx, key=f"cant_edit_{lname}")
                         imp  = st.text_input("Impacto", p.get("impacto",""), key=f"imp_edit_{lname}")
                         enl  = st.text_input("Enlace", p.get("enlace",""), key=f"enl_edit_{lname}")
                         des  = st.text_area("Descripción", p.get("desc",""), key=f"desc_edit_{lname}")
@@ -464,25 +457,45 @@ with tab_export:
                            file_name=f"{st.session_state.project_name}.csv", mime="text/csv",
                            disabled=(len(fc["features"]) == 0), key="dl_csv")
 
-# ==================== 📡 GOOGLE SHEETS ====================
+# ==================== 📡 GOOGLE SHEETS (hotfix acepta 2 nombres en secrets) ====================
 with tab_sheets:
     st.subheader("Conexión a Google Sheets")
-    if not HAS_SHEETS:
-        st.warning("Instala dependencias y configura secrets para usar Google Sheets: `gspread` y `google-auth`. La app funciona sin Sheets.")
-    else:
-        try:
-            sa_info = st.secrets["google_service_account"]
-            creds = Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-            gc = gspread.authorize(creds)
-            sh = gc.open_by_key(st.secrets["SHEETS_SPREADSHEET_ID"])
-            ws = sh.worksheet(st.secrets.get("SHEETS_WORKSHEET_NAME", "Hoja 1"))
-            st.success("✅ Conectado a Google Sheets.")
-        except Exception as e:
-            st.error(f"No se pudo conectar: {e}")
-            ws = None
 
+    # ===== util para leer cualquiera de los 2 bloques: [google_service_account] o [gcp_service_account]
+    def _get_sa_info():
+        if "google_service_account" in st.secrets:
+            return st.secrets["google_service_account"]
+        if "gcp_service_account" in st.secrets:
+            return st.secrets["gcp_service_account"]
+        return None
+
+    try:
+        sa_info = _get_sa_info()
+        if not sa_info:
+            raise RuntimeError("No encuentro [google_service_account] ni [gcp_service_account] en secrets.toml")
+
+        spreadsheet_id = st.secrets.get("SHEETS_SPREADSHEET_ID", "").strip()
+        worksheet_name = st.secrets.get("SHEETS_WORKSHEET_NAME", "Hoja 1").strip()
+        if not spreadsheet_id:
+            raise RuntimeError("Falta SHEETS_SPREADSHEET_ID en secrets.toml")
+
+        from google.oauth2.service_account import Credentials
+        import gspread
+
+        creds = Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(spreadsheet_id)
+
+        # Si la hoja no existe, la crea
+        try:
+            ws = sh.worksheet(worksheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title=worksheet_name, rows="100", cols="20")
+
+        st.success(f"✅ Conectado a Sheets • Hoja: {worksheet_name}")
         st.caption("Estructura: id, layer, color, titulo, desc, fecha, provincia, canton, responsable, impacto, enlace, lat, lon")
-        c1, c2 = st.columns(2)
+
+        c1, c2, c3 = st.columns(3)
 
         def rows_from_app() -> List[List[Any]]:
             fc = all_features_fc()
@@ -494,16 +507,16 @@ with tab_sheets:
                              p.get("impacto",""), p.get("enlace",""), lat, lon])
             return rows
 
-        def app_from_rows(rows: List[List[Any]]):
+        def app_from_rows(values: List[List[Any]]):
             layers = {}
-            for r in rows[1:]:
+            for r in values[1:]:
                 if not r or len(r) < 13: continue
                 _id, layer, color, titulo, desc, fecha, provincia, canton, resp, impacto, enlace, lat, lon = r
                 color = _clean_hex(color or "#1f77b4")
                 feat = {
                     "type":"Feature",
                     "properties":{
-                        "id": _id or uuid.uuid4().hex[:12], "layer": layer, "color": color, "titulo": str(titulo or ""),
+                        "id": _id or _new_id(), "layer": layer, "color": color, "titulo": str(titulo or ""),
                         "desc": str(desc or ""), "fecha": str(fecha or ""), "provincia": str(provincia or ""),
                         "canton": str(canton or ""), "responsable": str(resp or ""), "impacto": str(impacto or ""),
                         "enlace": str(enlace or "")
@@ -513,30 +526,30 @@ with tab_sheets:
                 if layer not in layers:
                     layers[layer] = {"color": color, "visible": True, "features": []}
                 layers[layer]["features"].append(feat)
-                if "color" not in layers[layer] or not layers[layer]["color"]:
-                    layers[layer]["color"] = color
             st.session_state.layers = layers
 
         with c1:
-            if ws and st.button("⬇️ Cargar desde Google Sheets", key="load_sheets"):
-                try:
-                    values = ws.get_all_values()
-                    if values:
-                        app_from_rows(values)
-                        st.success("Datos cargados desde Sheets a la app.")
-                        st.experimental_rerun()
-                    else:
-                        st.info("La hoja está vacía.")
-                except Exception as e:
-                    st.error(f"Error al leer: {e}")
+            if st.button("🔎 Probar conexión", key="probe_sheets"):
+                _ = ws.get_all_values()
+                st.success("Conexión OK y lectura permitida.")
 
         with c2:
-            if ws and st.button("⬆️ Subir (reemplaza en Sheets)", key="save_sheets"):
-                try:
-                    rows = rows_from_app()
-                    ws.clear()
-                    ws.update("A1", rows)
-                    st.success("Datos subidos. (Se reemplazó el contenido de la hoja)")
-                except Exception as e:
-                    st.error(f"Error al escribir: {e}")
+            if st.button("⬇️ Cargar desde Sheets", key="load_sheets"):
+                values = ws.get_all_values()
+                if values:
+                    app_from_rows(values)
+                    st.success("Datos cargados desde Sheets.")
+                    st.experimental_rerun()
+                else:
+                    st.info("La hoja está vacía.")
 
+        with c3:
+            if st.button("⬆️ Subir (reemplazar hoja)", key="save_sheets"):
+                rows = rows_from_app()
+                ws.clear()
+                ws.update("A1", rows)
+                st.success("Datos subidos a Sheets (hoja reemplazada).")
+
+    except Exception as e:
+        st.error(f"❌ No se pudo conectar a Google Sheets: {e}")
+        st.info("Revisa:\n• secrets.toml (IDs y bloque del service account)\n• que la hoja esté compartida con el correo del service account (Editor)\n• que la clave tenga \\n en cada salto de línea.")

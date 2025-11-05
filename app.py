@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Casos de Éxito – Capas, edición, Heatmap, Dashboard, Filtros Prov→Cantón y Google Sheets
+# Casos de Éxito – Capas, edición/mover, Heatmap, Dashboard, Filtros Prov→Cantón (catálogo CR) y Google Sheets.
 # Ejecuta: streamlit run app.py
 
 import io, json, zipfile, tempfile, re, datetime as dt, uuid
@@ -13,8 +13,7 @@ from shapely.geometry import Point
 
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import Draw, MeasureControl, MiniMap, HeatMap
-from folium.plugins import BeautifyIcon
+from folium.plugins import Draw, MeasureControl, MiniMap, HeatMap, BeautifyIcon
 
 # ====== Opcional: Google Sheets ======
 HAS_SHEETS = False
@@ -25,12 +24,44 @@ try:
 except Exception:
     HAS_SHEETS = False
 
-# ==================== CONFIG ====================
-st.set_page_config(page_title="Casos de Éxito – Mapas", layout="wide")
-st.title("🌟 Casos de Éxito – Mapas por capas")
-st.caption("Marca puntos (clic o ✏️), edita, Heatmap, filtros Provincia→Cantón y Dashboard. Exporta GeoJSON/ZIP/CSV. Conecta a Google Sheets (opcional).")
+# ==================== Catálogo Costa Rica ====================
+CR_CATALOG: Dict[str, List[str]] = {
+    "San José": [
+        "San José","Escazú","Desamparados","Puriscal","Tarrazú","Aserrí","Mora",
+        "Goicoechea","Santa Ana","Alajuelita","Vázquez de Coronado","Acosta",
+        "Tibás","Moravia","Montes de Oca","Turrubares","Dota","Curridabat",
+        "Pérez Zeledón","León Cortés"
+    ],
+    "Alajuela": [
+        "Alajuela","San Ramón","Grecia","San Mateo","Atenas","Naranjo","Palmares",
+        "Poás","Orotina","San Carlos","Zarcero","Sarchí","Upala","Los Chiles","Guatuso"
+    ],
+    "Cartago": [
+        "Cartago","Paraíso","La Unión","Jiménez","Turrialba","Alvarado","Oreamuno","El Guarco"
+    ],
+    "Heredia": [
+        "Heredia","Barva","Santo Domingo","Santa Bárbara","San Rafael","San Isidro",
+        "Belén","Flores","San Pablo","Sarapiquí"
+    ],
+    "Guanacaste": [
+        "Liberia","Nicoya","Santa Cruz","Bagaces","Carrillo","Cañas","Abangares",
+        "Tilarán","Nandayure","La Cruz","Hojancha"
+    ],
+    "Puntarenas": [
+        "Puntarenas","Esparza","Buenos Aires","Montes de Oro","Osa","Quepos","Golfito",
+        "Coto Brus","Parrita","Corredores","Garabito"
+    ],
+    "Limón": [
+        "Limón","Pococí","Siquirres","Talamanca","Matina","Guácimo"
+    ],
+}
 
-# ---------- Estado inicial ----------
+# ==================== Config general ====================
+st.set_page_config(page_title="Casos de Éxito – Mapas CR", layout="wide")
+st.title("🌟 Casos de Éxito – Mapas por capas (CR)")
+st.caption("Marca puntos (clic o ✏️), edita/mueve, Heatmap, Dashboard con filtros por Capa y Provincia→Cantón. Exporta GeoJSON/ZIP/CSV. Conecta a Google Sheets (opcional).")
+
+# ---------- Estado ----------
 if "layers" not in st.session_state:
     st.session_state.layers: Dict[str, Dict[str, Any]] = {
         "Infraestructura recuperada": {"color": "#2ca02c", "visible": True, "features": []},
@@ -42,8 +73,6 @@ if "project_name" not in st.session_state:
     st.session_state.project_name = "casos_exito"
 if "move_target" not in st.session_state:
     st.session_state.move_target: Optional[tuple] = None  # (layer, index)
-if "sheets_ready" not in st.session_state:
-    st.session_state.sheets_ready = False
 
 def _hex_ok(h): return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 def _clean_hex(h):
@@ -51,9 +80,9 @@ def _clean_hex(h):
     if not h.startswith("#"): h = "#" + h
     return h if _hex_ok(h) else "#1f77b4"
 
-# ==================== SIDEBAR: Proyecto / Mapas base / Capas ====================
+# ==================== Sidebar ====================
 st.sidebar.header("Proyecto")
-st.session_state.project_name = st.sidebar.text_input("Nombre del proyecto", st.session_state.project_name)
+st.session_state.project_name = st.sidebar.text_input("Nombre del proyecto", st.session_state.project_name, key="proj_name")
 
 st.sidebar.header("Mapa base")
 BASEMAPS = {
@@ -94,7 +123,7 @@ BASEMAPS = {
         "attr": 'Tiles &copy; Esri',
     },
 }
-basemap_name = st.sidebar.selectbox("Elegir mapa base", list(BASEMAPS.keys()), index=0)
+basemap_name = st.sidebar.selectbox("Elegir mapa base", list(BASEMAPS.keys()), index=0, key="basemap")
 
 st.sidebar.header("Capas (tipo de caso)")
 for lname, meta in list(st.session_state.layers.items()):
@@ -105,9 +134,9 @@ for lname, meta in list(st.session_state.layers.items()):
             del st.session_state.layers[lname]; st.rerun()
 
 with st.sidebar.expander("➕ Agregar capa"):
-    new_layer = st.text_input("Nombre de la nueva capa", "")
-    new_color = st.color_picker("Color", "#17becf", key="newcol")
-    if st.button("Crear capa"):
+    new_layer = st.text_input("Nombre de la nueva capa", "", key="new_layer")
+    new_color = st.color_picker("Color", "#17becf", key="new_layer_color")
+    if st.button("Crear capa", key="btn_new_layer"):
         name = new_layer.strip()
         if name and name not in st.session_state.layers:
             st.session_state.layers[name] = {"color": _clean_hex(new_color), "visible": True, "features": []}
@@ -162,39 +191,42 @@ def current_df() -> pd.DataFrame:
     if not feats: return pd.DataFrame(columns=["id","Capa","Título","Fecha","Resp","Provincia","Cantón","Impacto","Evidencia","Lat","Lon"])
     return pd.DataFrame([feature_to_row(f) for f in feats])
 
-# =============== 🗺️ MAPA (con filtros Prov→Cantón) ===============
+# ==================== 🗺️ MAPA ====================
 with tab_mapa:
     st.subheader("Filtros de visualización")
-    df_all = current_df()
-    # Valores únicos actuales
-    provs = sorted([p for p in df_all["Provincia"].dropna().unique().tolist() if p != ""])
-    # Cascada: Cantón depende de Provincia
-    provincia_f = st.selectbox("Provincia", ["(todas)"] + provs, index=0)
-    cantones_unq = sorted(df_all.loc[(df_all["Provincia"] == provincia_f) if provincia_f != "(todas)" else df_all.index, "Cantón"].dropna().unique().tolist())
-    canton_f = st.selectbox("Cantón", ["(todos)"] + cantones_unq, index=0)
+
+    # Selectores usando catálogo CR (independientes de los datos cargados)
+    provs_catalog = ["(todas)"] + list(CR_CATALOG.keys())
+    provincia_f = st.selectbox("Provincia", provs_catalog, index=0, key="prov_map")
+    cantones_catalog = ["(todos)"] + (CR_CATALOG.get(provincia_f, []) if provincia_f != "(todas)" else sorted({c for cs in CR_CATALOG.values() for c in cs}))
+    canton_f = st.selectbox("Cantón", cantones_catalog, index=0, key="canton_map")
 
     st.subheader("📝 Ficha del caso (se aplica al próximo punto que marques)")
     c1, c2, c3, c4 = st.columns([1,1,1,1])
-    with c1: layer_active = st.selectbox("Capa activa", list(st.session_state.layers.keys()))
-    with c2: titulo = st.text_input("Título", "Parque recuperado y seguro")
-    with c3: fecha = st.date_input("Fecha")
-    with c4: responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"])
-    desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.")[:240]
+    with c1: layer_active = st.selectbox("Capa activa", list(st.session_state.layers.keys()), key="layer_active_map")
+    with c2: titulo = st.text_input("Título", "Parque recuperado y seguro", key="titulo_map")
+    with c3: fecha = st.date_input("Fecha", key="fecha_map")
+    with c4: responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"], key="resp_map")
+    desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.", key="desc_map")[:240]
+
     d2a, d2b, d2c = st.columns([1,1,1])
-    with d2a: provincia = st.text_input("Provincia", provincia_f if provincia_f != "(todas)" else "San José")
-    with d2b: canton = st.text_input("Cantón", canton_f if canton_f != "(todos)" else "Montes de Oca")
-    with d2c: impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses")
-    enlace = st.text_input("Enlace a evidencia (opcional)", "")
+    # Prefill según selector
+    prov_prefill = provincia_f if provincia_f != "(todas)" else "San José"
+    cant_prefill = (canton_f if canton_f != "(todos)" else (CR_CATALOG[prov_prefill][0] if prov_prefill in CR_CATALOG else "Montes de Oca"))
+    with d2a: provincia = st.text_input("Provincia", prov_prefill, key="prov_in_form_map")
+    with d2b: canton = st.text_input("Cantón",   cant_prefill, key="canton_in_form_map")
+    with d2c: impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses", key="impacto_map")
+    enlace = st.text_input("Enlace a evidencia (opcional)", "", key="enlace_map")
 
     st.divider()
     colx, coly = st.columns([1,1])
     with colx:
-        use_heat = st.checkbox("🔥 Mostrar Heatmap (filtrado)", value=False)
-        heat_radius = st.slider("Radio Heatmap", 10, 60, 25, 1)
+        use_heat = st.checkbox("🔥 Mostrar Heatmap (filtrado)", value=False, key="heat_toggle")
+        heat_radius = st.slider("Radio Heatmap", 10, 60, 25, 1, key="heat_radius")
     with coly:
         st.caption("🔀 Mover por clic: " + (f"{st.session_state.move_target}" if st.session_state.move_target else "inactivo"))
 
-    # --- Construir mapa base ---
+    # Mapa base
     center_lat, center_lon = 9.94, -84.10
     m = folium.Map(location=[center_lat, center_lon], zoom_start=7, control_scale=True)
     bm = BASEMAPS[basemap_name]
@@ -203,11 +235,10 @@ with tab_mapa:
         if nm == basemap_name: continue
         folium.TileLayer(tiles=cfg["tiles"], name=nm, attr=cfg["attr"], control=True).add_to(m)
 
-    # Controles
     folium.plugins.Fullscreen(position="topleft").add_to(m)
     m.add_child(MiniMap(toggle_display=True))
     m.add_child(MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers",
-                            primary_area_unit="sqmeters", secondary_area_unit="hectares"))
+                               primary_area_unit="sqmeters", secondary_area_unit="hectares"))
     folium.LatLngPopup().add_to(m)
 
     # Filtro función
@@ -216,7 +247,7 @@ with tab_mapa:
         if canton_f != "(todos)" and props.get("canton","") != canton_f: return False
         return True
 
-    # Dibujar puntos por capa (viñeta)
+    # Dibujar puntos (viñeta por color de capa)
     all_points_for_heat = []
     for lname, meta in st.session_state.layers.items():
         if not meta.get("visible", True): 
@@ -256,7 +287,7 @@ with tab_mapa:
 
     map_state = st_folium(m, height=650, width=None, key="mapa_casos", feature_group_to_add=None)
 
-    # Propiedades base para alta
+    # Propiedades para nuevo punto
     new_props = {
         "id": _new_id(),
         "layer": layer_active,
@@ -271,7 +302,7 @@ with tab_mapa:
         "enlace": enlace.strip()
     }
 
-    # Alta por clic (si no hay mover activo)
+    # Alta por clic (si no estamos moviendo)
     if st.session_state.move_target is None and map_state and map_state.get("last_clicked"):
         lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
         st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, new_props))
@@ -300,14 +331,11 @@ with tab_mapa:
             if not feats:
                 st.info("Sin casos aún.")
             else:
-                df = pd.DataFrame([feature_to_row(f) for f in feats])
-                # Aplicar filtro también en tabla (para contexto)
-                if provincia_f != "(todas)":
-                    df = df[df["Provincia"] == provincia_f]
-                if canton_f != "(todos)":
-                    df = df[df["Cantón"] == canton_f]
-
-                st.dataframe(df, use_container_width=True)
+                df_layer = pd.DataFrame([feature_to_row(f) for f in feats])
+                # Mostrar con filtro aplicado (contexto)
+                if provincia_f != "(todas)": df_layer = df_layer[df_layer["Provincia"] == provincia_f]
+                if canton_f != "(todos)":   df_layer = df_layer[df_layer["Cantón"] == canton_f]
+                st.dataframe(df_layer, use_container_width=True)
 
                 colx, coly, colz = st.columns([1,1,1])
                 # Eliminar
@@ -323,14 +351,19 @@ with tab_mapa:
                     f = feats[int(idx_edit)]
                     with st.form(f"edit_form_{lname}"):
                         p = f["properties"]
-                        t = st.text_input("Título", p.get("titulo",""))
-                        fe = st.date_input("Fecha", value=pd.to_datetime(p.get("fecha", dt.date.today())).date())
-                        resp = st.selectbox("Responsable", ["GL","FP","Mixta"], index=["GL","FP","Mixta"].index(p.get("responsable","GL")))
-                        prov = st.text_input("Provincia", p.get("provincia",""))
-                        cant = st.text_input("Cantón", p.get("canton",""))
-                        imp  = st.text_input("Impacto", p.get("impacto",""))
-                        enl  = st.text_input("Enlace", p.get("enlace",""))
-                        des  = st.text_area("Descripción", p.get("desc",""))
+                        t = st.text_input("Título", p.get("titulo",""), key=f"title_edit_{lname}")
+                        fe = st.date_input("Fecha", value=pd.to_datetime(p.get("fecha", dt.date.today())).date(), key=f"date_edit_{lname}")
+                        resp = st.selectbox("Responsable", ["GL","FP","Mixta"],
+                                            index=["GL","FP","Mixta"].index(p.get("responsable","GL")),
+                                            key=f"resp_edit_{lname}")
+                        prov = st.selectbox("Provincia (catálogo)", list(CR_CATALOG.keys()),
+                                            index=max(0, list(CR_CATALOG.keys()).index(p.get("provincia","San José"))), key=f"prov_edit_{lname}")
+                        cant = st.selectbox("Cantón (catálogo)", CR_CATALOG.get(prov, []),
+                                            index=max(0, CR_CATALOG.get(prov, []).index(p.get("canton", CR_CATALOG.get(prov, [''])[0]))),
+                                            key=f"cant_edit_{lname}")
+                        imp  = st.text_input("Impacto", p.get("impacto",""), key=f"imp_edit_{lname}")
+                        enl  = st.text_input("Enlace", p.get("enlace",""), key=f"enl_edit_{lname}")
+                        des  = st.text_area("Descripción", p.get("desc",""), key=f"desc_edit_{lname}")
                         submitted = st.form_submit_button("💾 Guardar")
                     if submitted:
                         p.update({"titulo": t.strip(), "fecha": str(fe), "responsable": resp,
@@ -347,7 +380,7 @@ with tab_mapa:
                     if st.button("❌ Cancelar", key=f"btn_cancel_move_{lname}"):
                         st.session_state.move_target = None; st.rerun()
 
-    # Aplicar movimiento
+    # Aplicar movimiento con clic
     if st.session_state.move_target and map_state and map_state.get("last_clicked"):
         lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
         lname, idx = st.session_state.move_target
@@ -355,7 +388,7 @@ with tab_mapa:
         st.session_state.move_target = None
         st.success(f"Ubicación actualizada a ({lat:.5f}, {lon:.5f})."); st.rerun()
 
-# =============== 📊 DASHBOARD (con filtros por capa + Prov/Cantón) ===============
+# ==================== 📊 DASHBOARD ====================
 with tab_dashboard:
     st.subheader("Filtros")
     df = current_df()
@@ -363,15 +396,15 @@ with tab_dashboard:
         st.info("Aún no hay datos para graficar.")
     else:
         capas = sorted(df["Capa"].unique().tolist())
-        capa_f = st.multiselect("Capas", capas, default=capas)
-        provs = sorted([p for p in df["Provincia"].dropna().unique().tolist() if p != ""])
-        provincia_f = st.selectbox("Provincia", ["(todas)"] + provs, index=0)
-        cantones = sorted(df[df["Provincia"] == provincia_f]["Cantón"].dropna().unique().tolist()) if provincia_f != "(todas)" else sorted(df["Cantón"].dropna().unique().tolist())
-        canton_f = st.selectbox("Cantón", ["(todos)"] + cantones, index=0)
+        capa_f = st.multiselect("Capas", capas, default=capas, key="capas_dash")
+
+        provincia_f_dash = st.selectbox("Provincia", ["(todas)"] + list(CR_CATALOG.keys()), index=0, key="prov_dash")
+        cantones_dash = ["(todos)"] + (CR_CATALOG.get(provincia_f_dash, []) if provincia_f_dash != "(todas)" else sorted({c for cs in CR_CATALOG.values() for c in cs}))
+        canton_f_dash = st.selectbox("Cantón", cantones_dash, index=0, key="canton_dash")
 
         fdf = df[df["Capa"].isin(capa_f)].copy()
-        if provincia_f != "(todas)": fdf = fdf[fdf["Provincia"] == provincia_f]
-        if canton_f != "(todos)":   fdf = fdf[fdf["Cantón"] == canton_f]
+        if provincia_f_dash != "(todas)": fdf = fdf[fdf["Provincia"] == provincia_f_dash]
+        if canton_f_dash != "(todos)":   fdf = fdf[fdf["Cantón"] == canton_f_dash]
 
         fdf["Fecha"] = pd.to_datetime(fdf["Fecha"], errors="coerce")
         fdf["Año-Mes"] = fdf["Fecha"].dt.to_period("M").astype(str)
@@ -395,7 +428,7 @@ with tab_dashboard:
         st.divider(); st.markdown("**Tabla (filtrada)**")
         st.dataframe(fdf, use_container_width=True)
 
-# =============== 📤 EXPORTAR ===============
+# ==================== 📤 EXPORTAR ====================
 with tab_export:
     st.subheader("Exportar a ArcGIS (todas las capas)")
     fc = all_features_fc(); gdf = gdf_from_fc(fc)
@@ -421,33 +454,32 @@ with tab_export:
     with c1:
         st.download_button("⬇️ GeoJSON", data=export_geojson_bytes(fc),
                            file_name=f"{st.session_state.project_name}.geojson", mime="application/geo+json",
-                           disabled=(len(fc["features"]) == 0))
+                           disabled=(len(fc["features"]) == 0), key="dl_geojson")
     with c2:
         st.download_button("⬇️ Shapefile (ZIP)", data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
                            file_name=f"{st.session_state.project_name}.zip", mime="application/zip",
-                           disabled=(len(fc["features"]) == 0))
+                           disabled=(len(fc["features"]) == 0), key="dl_shp")
     with c3:
         st.download_button("⬇️ CSV (atributos + lat/lon)", data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
                            file_name=f"{st.session_state.project_name}.csv", mime="text/csv",
-                           disabled=(len(fc["features"]) == 0))
+                           disabled=(len(fc["features"]) == 0), key="dl_csv")
 
-# =============== 📡 GOOGLE SHEETS ===============
+# ==================== 📡 GOOGLE SHEETS ====================
 with tab_sheets:
     st.subheader("Conexión a Google Sheets")
     if not HAS_SHEETS:
         st.warning("Instala dependencias y configura secrets para usar Google Sheets: `gspread` y `google-auth`. La app funciona sin Sheets.")
     else:
         try:
-            # Crear cliente desde secrets
             sa_info = st.secrets["google_service_account"]
             creds = Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(st.secrets["SHEETS_SPREADSHEET_ID"])
             ws = sh.worksheet(st.secrets.get("SHEETS_WORKSHEET_NAME", "Hoja 1"))
-            st.session_state.sheets_ready = True
+            st.success("✅ Conectado a Google Sheets.")
         except Exception as e:
             st.error(f"No se pudo conectar: {e}")
-            st.session_state.sheets_ready = False
+            ws = None
 
         st.caption("Estructura: id, layer, color, titulo, desc, fecha, provincia, canton, responsable, impacto, enlace, lat, lon")
         c1, c2 = st.columns(2)
@@ -463,7 +495,6 @@ with tab_sheets:
             return rows
 
         def app_from_rows(rows: List[List[Any]]):
-            # rows incluye encabezados en [0]
             layers = {}
             for r in rows[1:]:
                 if not r or len(r) < 13: continue
@@ -472,7 +503,7 @@ with tab_sheets:
                 feat = {
                     "type":"Feature",
                     "properties":{
-                        "id": _id or _new_id(), "layer": layer, "color": color, "titulo": str(titulo or ""),
+                        "id": _id or uuid.uuid4().hex[:12], "layer": layer, "color": color, "titulo": str(titulo or ""),
                         "desc": str(desc or ""), "fecha": str(fecha or ""), "provincia": str(provincia or ""),
                         "canton": str(canton or ""), "responsable": str(resp or ""), "impacto": str(impacto or ""),
                         "enlace": str(enlace or "")
@@ -482,26 +513,25 @@ with tab_sheets:
                 if layer not in layers:
                     layers[layer] = {"color": color, "visible": True, "features": []}
                 layers[layer]["features"].append(feat)
-                # Mantener color del primer registro por capa
                 if "color" not in layers[layer] or not layers[layer]["color"]:
                     layers[layer]["color"] = color
             st.session_state.layers = layers
 
         with c1:
-            if st.session_state.sheets_ready and st.button("⬇️ Cargar desde Google Sheets"):
+            if ws and st.button("⬇️ Cargar desde Google Sheets", key="load_sheets"):
                 try:
                     values = ws.get_all_values()
                     if values:
                         app_from_rows(values)
                         st.success("Datos cargados desde Sheets a la app.")
-                        st.rerun()
+                        st.experimental_rerun()
                     else:
                         st.info("La hoja está vacía.")
                 except Exception as e:
                     st.error(f"Error al leer: {e}")
 
         with c2:
-            if st.session_state.sheets_ready and st.button("⬆️ Subir (reemplaza en Sheets)"):
+            if ws and st.button("⬆️ Subir (reemplaza en Sheets)", key="save_sheets"):
                 try:
                     rows = rows_from_app()
                     ws.clear()
@@ -509,3 +539,4 @@ with tab_sheets:
                     st.success("Datos subidos. (Se reemplazó el contenido de la hoja)")
                 except Exception as e:
                     st.error(f"Error al escribir: {e}")
+

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-# Casos de Éxito – Mapa por capas (CR) + Edición/Mover + Heatmap + Dashboard + Export + Google Sheets
+# Casos de Éxito — Mapas CR (Capas, Edición/Mover, Heatmap, Dashboard, Export, Google Sheets)
 # Ejecuta: streamlit run app.py
 
-import io, json, zipfile, tempfile, re, datetime as dt, uuid
+import io, json, zipfile, tempfile, re, datetime as dt, uuid, math
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -50,7 +50,7 @@ CR_CATALOG: Dict[str, List[str]] = {
 # ==================== Config general ====================
 st.set_page_config(page_title="Casos de Éxito – Mapas CR", layout="wide")
 st.title("🌟 Casos de Éxito – Mapas por capas (CR)")
-st.caption("Marca puntos (clic o ✏️), edita/mueve, Heatmap, Dashboard con filtros por Capa y Provincia→Cantón. Exporta GeoJSON/ZIP/CSV. Conecta a Google Sheets (opcional).")
+st.caption("Clic en el mapa → **Confirmar** para agregar. Edita, mueve, filtra por Capa/Provincia/Cantón, Heatmap, Dashboard, Export y Google Sheets.")
 
 # ---------- Estado ----------
 if "layers" not in st.session_state:
@@ -64,6 +64,10 @@ if "project_name" not in st.session_state:
     st.session_state.project_name = "casos_exito"
 if "move_target" not in st.session_state:
     st.session_state.move_target: Optional[tuple] = None  # (layer, index)
+if "last_click" not in st.session_state:
+    st.session_state.last_click: Optional[tuple] = None  # (lat, lon)
+if "last_added_from_click" not in st.session_state:
+    st.session_state.last_added_from_click: Optional[tuple] = None
 
 def _hex_ok(h): return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 def _clean_hex(h):
@@ -182,15 +186,19 @@ def current_df() -> pd.DataFrame:
     if not feats: return pd.DataFrame(columns=["id","Capa","Título","Fecha","Resp","Provincia","Cantón","Impacto","Evidencia","Lat","Lon"])
     return pd.DataFrame([feature_to_row(f) for f in feats])
 
+def _same_click(a: Optional[tuple], b: Optional[tuple], tol=1e-7) -> bool:
+    if not a or not b: return False
+    return (abs(a[0]-b[0]) < tol) and (abs(a[1]-b[1]) < tol)
+
 # ==================== 🗺️ MAPA ====================
 with tab_mapa:
     st.subheader("Filtros de visualización")
 
-    # Selectores usando catálogo CR (independientes de los datos cargados)
+    # Selectores cascada (oficiales)
     provs_catalog = ["(todas)"] + list(CR_CATALOG.keys())
-    provincia_f = st.selectbox("Provincia", provs_catalog, index=0, key="prov_map")
-    cantones_catalog = ["(todos)"] + (CR_CATALOG.get(provincia_f, []) if provincia_f != "(todas)" else sorted({c for cs in CR_CATALOG.values() for c in cs}))
-    canton_f = st.selectbox("Cantón", cantones_catalog, index=0, key="canton_map")
+    provincia_sel = st.selectbox("Provincia", provs_catalog, index=0, key="prov_map")
+    cantones_catalog = ["(todos)"] + (CR_CATALOG.get(provincia_sel, []) if provincia_sel != "(todas)" else sorted({c for cs in CR_CATALOG.values() for c in cs}))
+    canton_sel = st.selectbox("Cantón", cantones_catalog, index=0, key="canton_map")
 
     st.subheader("📝 Ficha del caso (se aplica al próximo punto que marques)")
     c1, c2, c3, c4 = st.columns([1,1,1,1])
@@ -200,11 +208,14 @@ with tab_mapa:
     with c4: responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"], key="resp_map")
     desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.", key="desc_map")[:240]
 
+    # Provincia/Cantón en la ficha SIEMPRE sincronizados con los filtros superiores
+    # (evita desorden y errores; si quieres desbloquear, cambia disabled=False)
     d2a, d2b, d2c = st.columns([1,1,1])
-    prov_prefill = provincia_f if provincia_f != "(todas)" else "San José"
-    cant_prefill = (canton_f if canton_f != "(todos)" else (CR_CATALOG[prov_prefill][0] if prov_prefill in CR_CATALOG else "Montes de Oca"))
-    with d2a: provincia = st.text_input("Provincia", prov_prefill, key="prov_in_form_map")
-    with d2b: canton = st.text_input("Cantón",   cant_prefill, key="canton_in_form_map")
+    with d2a: st.text_input("Provincia (auto)", value=("San José" if provincia_sel=="(todas)" else provincia_sel), key="prov_in_form_map", disabled=True)
+    # Cantón depende de la provincia seleccionada
+    cant_list_for_form = (CR_CATALOG.get(provincia_sel, []) if provincia_sel != "(todas)" else [])
+    cant_default = (canton_sel if canton_sel != "(todos)" else (cant_list_for_form[0] if cant_list_for_form else ""))
+    with d2b: st.text_input("Cantón (auto)", value=cant_default, key="canton_in_form_map", disabled=True)
     with d2c: impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses", key="impacto_map")
     enlace = st.text_input("Enlace a evidencia (opcional)", "", key="enlace_map")
 
@@ -231,22 +242,22 @@ with tab_mapa:
                                primary_area_unit="sqmeters", secondary_area_unit="hectares"))
     folium.LatLngPopup().add_to(m)
 
-    # Filtro función
+    # Filtro función (para render)
     def pass_filter(props: Dict[str, Any]) -> bool:
-        if provincia_f != "(todas)" and props.get("provincia","") != provincia_f: return False
-        if canton_f != "(todos)" and props.get("canton","") != canton_f: return False
+        if provincia_sel != "(todas)" and props.get("provincia","") != provincia_sel: return False
+        if canton_sel != "(todos)" and props.get("canton","") != canton_sel: return False
         return True
 
-    # Dibujar puntos (viñeta por color de capa)
+    # Dibujar puntos
     all_points_for_heat = []
     for lname, meta in st.session_state.layers.items():
-        if not meta.get("visible", True): 
+        if not meta.get("visible", True):
             continue
         fg = folium.FeatureGroup(name=lname, show=True)
         color = _clean_hex(meta["color"])
         for idx, feat in enumerate(meta.get("features", [])):
             props = feat["properties"]
-            if not pass_filter(props): 
+            if not pass_filter(props):
                 continue
             lat, lon = feat["geometry"]["coordinates"][1], feat["geometry"]["coordinates"][0]
             html = f"""
@@ -271,47 +282,54 @@ with tab_mapa:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    Draw(draw_options={"polyline": False, "polygon": False, "rectangle": False, "circle": False,
-                       "marker": True, "circlemarker": False},
-         edit_options={"edit": False, "remove": False}).add_to(m)
-
+    # Herramienta de dibujo deshabilitada para evitar bloqueos; solo clic + confirmación
     map_state = st_folium(m, height=650, width=None, key="mapa_casos", feature_group_to_add=None)
 
-    # Propiedades para nuevo punto
-    new_props = {
-        "id": _new_id(),
-        "layer": layer_active,
-        "color": _clean_hex(st.session_state.layers[layer_active]["color"]),
-        "titulo": titulo.strip(),
-        "desc": desc.strip(),
-        "fecha": str(fecha),
-        "provincia": provincia.strip(),
-        "canton": canton.strip(),
-        "responsable": responsable,
-        "impacto": impacto.strip(),
-        "enlace": enlace.strip()
-    }
+    # Registrar el último clic (sin agregar todavía)
+    click = map_state.get("last_clicked") if map_state else None
+    if click:
+        st.session_state.last_click = (float(click["lat"]), float(click["lng"]))
 
-    # Alta por clic (si no estamos moviendo)
-    if st.session_state.move_target is None and map_state and map_state.get("last_clicked"):
-        lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
-        st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, new_props))
-        st.success(f"Punto agregado: '{layer_active}' ({lat:.5f}, {lon:.5f})."); st.rerun()
+    # Vista/confirmación del clic
+    colc1, colc2, colc3 = st.columns([1,1,1])
+    with colc1:
+        st.info(f"Último clic: {st.session_state.last_click}" if st.session_state.last_click else "Haz clic en el mapa para elegir ubicación.")
+    with colc2:
+        confirm_add = st.button("➕ Confirmar agregar punto aquí", key="btn_confirm_add", disabled=(st.session_state.last_click is None or st.session_state.move_target is not None))
+    with colc3:
+        clear_click = st.button("🧹 Limpiar selección de clic", key="btn_clear_click", disabled=(st.session_state.last_click is None))
 
-    # Alta por herramienta de dibujo
-    drawn = None
-    for key in ["last_active_drawing", "last_drawn_feature", "last_drawing"]:
-        if map_state and map_state.get(key): drawn = map_state[key]; break
-    if st.session_state.move_target is None and drawn:
-        try:
-            geom = drawn.get("geometry", {})
-            if geom.get("type") == "Point":
-                lon, lat = geom["coordinates"]
-                st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, new_props))
-                st.success(f"Punto agregado (✏️): '{layer_active}' ({lat:.5f}, {lon:.5f})."); st.rerun()
-        except Exception:
-            pass
+    if clear_click:
+        st.session_state.last_click = None
+        st.session_state.last_added_from_click = None
+        st.rerun()
 
+    # Agregar (con confirmación y anti-duplicados)
+    if confirm_add and st.session_state.last_click:
+        lat, lon = st.session_state.last_click
+        # evita duplicado por mismo clic en el rerun
+        if not _same_click(st.session_state.last_added_from_click, (lat, lon), tol=1e-12):
+            provincia_to_save = ("San José" if provincia_sel=="(todas)" else provincia_sel)
+            canton_to_save = (cant_default if provincia_sel!="(todas)" else "")
+            props = {
+                "id": _new_id(),
+                "layer": layer_active,
+                "color": _clean_hex(st.session_state.layers[layer_active]["color"]),
+                "titulo": titulo.strip(),
+                "desc": desc.strip(),
+                "fecha": str(fecha),
+                "provincia": provincia_to_save,
+                "canton": canton_to_save,
+                "responsable": responsable,
+                "impacto": impacto.strip(),
+                "enlace": enlace.strip()
+            }
+            st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, props))
+            st.session_state.last_added_from_click = (lat, lon)
+            st.toast(f"Punto agregado en {provincia_to_save} / {canton_to_save} ({lat:.5f}, {lon:.5f})", icon="✅")
+            # mantenemos el clic por si deseas agregar otro cerca; no forzamos rerun extra
+
+# ==================== 📋 Gestión (eliminar / editar / mover) ====================
     st.divider()
     st.subheader("📋 Gestión por capas (eliminar / **editar / mover**)")
     tabs = st.tabs(list(st.session_state.layers.keys()))
@@ -323,8 +341,8 @@ with tab_mapa:
             else:
                 df_layer = pd.DataFrame([feature_to_row(f) for f in feats])
                 # Mostrar con filtro aplicado (contexto)
-                if provincia_f != "(todas)": df_layer = df_layer[df_layer["Provincia"] == provincia_f]
-                if canton_f != "(todos)":   df_layer = df_layer[df_layer["Cantón"] == canton_f]
+                if provincia_sel != "(todas)": df_layer = df_layer[df_layer["Provincia"] == provincia_sel]
+                if canton_sel != "(todos)":   df_layer = df_layer[df_layer["Cantón"] == canton_sel]
                 st.dataframe(df_layer, use_container_width=True)
 
                 colx, coly, colz = st.columns([1,1,1])
@@ -373,7 +391,7 @@ with tab_mapa:
                     if st.button("❌ Cancelar", key=f"btn_cancel_move_{lname}"):
                         st.session_state.move_target = None; st.rerun()
 
-    # Aplicar movimiento con clic
+    # Aplicar movimiento
     if st.session_state.move_target and map_state and map_state.get("last_clicked"):
         lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
         lname, idx = st.session_state.move_target
@@ -461,7 +479,6 @@ with tab_export:
 with tab_sheets:
     st.subheader("Conexión a Google Sheets")
 
-    # ===== util para leer cualquiera de los 2 bloques: [google_service_account] o [gcp_service_account]
     def _get_sa_info():
         if "google_service_account" in st.secrets:
             return st.secrets["google_service_account"]
@@ -486,7 +503,6 @@ with tab_sheets:
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(spreadsheet_id)
 
-        # Si la hoja no existe, la crea
         try:
             ws = sh.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Casos de Éxito – Capas, clic en mapa (marcar), modos de mapa y export a ArcGIS
+# Casos de Éxito – Mapas por capas (clic para marcar) + export a ArcGIS
 # Ejecuta: streamlit run app.py
 
 import io, json, zipfile, tempfile, re
@@ -43,15 +43,42 @@ st.session_state.project_name = st.sidebar.text_input("Nombre del proyecto", st.
 
 st.sidebar.header("Mapa base")
 BASEMAPS = {
-    "Carto Claro":       ("CartoDB positron", {}),
-    "OSM Estándar":      ("OpenStreetMap", {}),
-    "Stamen Terreno":    ("Stamen Terrain", {}),
-    "Stamen Toner":      ("Stamen Toner", {}),
-    "Esri Satélite":     ("Esri.WorldImagery", {}),
-    "Esri Calles":       ("Esri.WorldStreetMap", {}),
-    "Esri Topográfico":  ("Esri.WorldTopoMap", {}),
-    "Esri Gray (Light)": ("Esri.WorldGrayCanvas", {}),
-    "Carto Dark":        ("CartoDB dark_matter", {}),
+    "OSM Estándar": {
+        "tiles": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "attr": '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    },
+    "Carto Claro": {
+        "tiles": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        "attr": '&copy; <a href="https://carto.com/">CARTO</a>, &copy; OSM',
+    },
+    "Carto Dark": {
+        "tiles": "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+        "attr": '&copy; <a href="https://carto.com/">CARTO</a>, &copy; OSM',
+    },
+    "Stamen Terreno": {
+        "tiles": "https://stamen-tiles-{s}.a.ssl.fastly.net/terrain/{z}/{x}/{y}.jpg",
+        "attr": 'Map tiles by <a href="http://stamen.com">Stamen</a>, Data &copy; OSM',
+    },
+    "Stamen Toner": {
+        "tiles": "https://stamen-tiles-{s}.a.ssl.fastly.net/toner/{z}/{x}/{y}.png",
+        "attr": 'Map tiles by <a href="http://stamen.com">Stamen</a>, Data &copy; OSM',
+    },
+    "Esri Satélite": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "attr": 'Tiles &copy; <a href="https://www.esri.com/">Esri</a>',
+    },
+    "Esri Calles": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        "attr": 'Tiles &copy; Esri',
+    },
+    "Esri Topográfico": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        "attr": 'Tiles &copy; Esri',
+    },
+    "Esri Gray (Light)": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "attr": 'Tiles &copy; Esri',
+    },
 }
 basemap_name = st.sidebar.selectbox("Elegir mapa base", list(BASEMAPS.keys()), index=0)
 
@@ -88,27 +115,25 @@ enlace = st.text_input("Enlace a evidencia (opcional)", "")
 
 # ==================== MAPA (con clic y con herramienta de dibujo) ====================
 st.subheader("🗺️ Mapa (clic o use la ✏️ herramienta de dibujo)")
-# Centro de CR
 center_lat, center_lon = 9.94, -84.10
 m = folium.Map(location=[center_lat, center_lon], zoom_start=7, control_scale=True)
 
-# Mapa base principal seleccionado
-tile_id, tile_opts = BASEMAPS[basemap_name]
-folium.TileLayer(tile_id, name=basemap_name, **tile_opts, control=False).add_to(m)
+# Mapa base seleccionado
+bm = BASEMAPS[basemap_name]
+folium.TileLayer(tiles=bm["tiles"], name=basemap_name, attr=bm["attr"], control=False).add_to(m)
+# Alternativas en el selector
+for nm, cfg in BASEMAPS.items():
+    if nm == basemap_name: continue
+    folium.TileLayer(tiles=cfg["tiles"], name=nm, attr=cfg["attr"], control=True).add_to(m)
 
-# Extras: capas base alternas (para activar desde el control, opcional)
-for nm, (tid, topts) in BASEMAPS.items():
-    if nm != basemap_name:
-        folium.TileLayer(tid, name=nm, **topts).add_to(m)
-
-# Controles útiles
+# Controles
 folium.plugins.Fullscreen(position="topleft").add_to(m)
 m.add_child(MiniMap(toggle_display=True))
 m.add_child(MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers",
                            primary_area_unit="sqmeters", secondary_area_unit="hectares"))
-folium.LatLngPopup().add_to(m)  # muestra lat/lon al hacer clic
+folium.LatLngPopup().add_to(m)  # muestra lat/lon al clic
 
-# Dibujar las capas existentes
+# Dibujar puntos existentes por capa
 for lname, meta in st.session_state.layers.items():
     if not meta.get("visible", True): 
         continue
@@ -133,17 +158,16 @@ for lname, meta in st.session_state.layers.items():
         ).add_to(fg)
     fg.add_to(m)
 
-# Control de capas (incluye mapas base y grupos)
 folium.LayerControl(collapsed=False).add_to(m)
 
-# ✏️ Herramienta de dibujo (Marker/Point, Line, Polygon, Rectangle)
+# ✏️ Herramienta de dibujo (solo marcadores para este MVP)
 Draw(
     draw_options={
-        "polyline": False,  # si luego quieres líneas, pon True
-        "polygon": False,   # ídem polígonos
+        "polyline": False,
+        "polygon": False,
         "rectangle": False,
         "circle": False,
-        "marker": True,     # <- marcadores activados
+        "marker": True,
         "circlemarker": False,
     },
     edit_options={"edit": False, "remove": False},
@@ -171,21 +195,19 @@ def _build_feature(lon: float, lat: float) -> Dict[str, Any]:
     }
     return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]}}
 
-# 1) Clic simple (en cualquier parte del mapa)
+# 1) Clic simple
 if map_state and map_state.get("last_clicked"):
     lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
     st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat))
     st.success(f"Punto agregado con clic en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
     st.rerun()
 
-# 2) Dibujo de marcador (botón ✏️ -> marcador)
-# streamlit-folium devuelve esto en diferentes claves según versión:
+# 2) Dibujo de marcador (herramienta ✏️)
 drawn = None
 for key in ["last_active_drawing", "last_drawn_feature", "last_drawing"]:
     if map_state and map_state.get(key):
         drawn = map_state[key]; break
 if drawn:
-    # Esperamos un dict GeoJSON; para marker, geometry: Point [lon, lat]
     try:
         geom = drawn.get("geometry", {})
         if geom.get("type") == "Point":
@@ -218,7 +240,7 @@ for i, lname in enumerate(st.session_state.layers.keys()):
             } for f in feats])
             st.dataframe(df, use_container_width=True)
 
-            colx, coly = st.columns([1,1])
+            colx, coly, colz = st.columns([1,1,1])
             with colx:
                 idx_del = st.number_input("Eliminar fila (índice)", min_value=0, max_value=len(df)-1, value=0, step=1, key=f"idx_{lname}")
                 if st.button("🗑️ Eliminar", key=f"btn_del_{lname}"):
@@ -226,6 +248,12 @@ for i, lname in enumerate(st.session_state.layers.keys()):
             with coly:
                 if st.button("🧹 Vaciar capa", key=f"btn_clear_{lname}"):
                     st.session_state.layers[lname]["features"].clear(); st.rerun()
+            with colz:
+                if st.button("💾 Descargar solo esta capa (GeoJSON)", key=f"dl_layer_{lname}"):
+                    fc = {"type":"FeatureCollection","features":feats}
+                    st.download_button("Guardar", data=json.dumps(fc, ensure_ascii=False).encode("utf-8"),
+                                       file_name=f"{st.session_state.project_name}_{lname}.geojson",
+                                       mime="application/geo+json")
 
 st.divider()
 
@@ -246,32 +274,53 @@ def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
         recs.append({**p, "geometry": Point(lon, lat)})
     return gpd.GeoDataFrame(recs, crs="EPSG:4326")
 
-def export_geojson_bytes(fc: Dict[str, Any]) -> bytes: return json.dumps(fc, ensure_ascii=False).encode("utf-8")
+def export_geojson_bytes(fc: Dict[str, Any]) -> bytes: 
+    return json.dumps(fc, ensure_ascii=False).encode("utf-8")
+
 def export_csv_bytes(gdf: gpd.GeoDataFrame) -> bytes:
-    df = pd.DataFrame(gdf.drop(columns="geometry")); df["lat"] = gdf.geometry.y; df["lon"] = gdf.geometry.x
+    df = pd.DataFrame(gdf.drop(columns="geometry"))
+    df["lat"] = gdf.geometry.y
+    df["lon"] = gdf.geometry.x
     return df.to_csv(index=False).encode("utf-8")
+
 def export_shapefile_zip_bytes(gdf: gpd.GeoDataFrame) -> bytes:
     with tempfile.TemporaryDirectory() as tmpd:
-        shp = Path(tmpd) / "casos_exito.shp"; gdf.to_file(shp, driver="ESRI Shapefile", encoding="utf-8")
+        shp = Path(tmpd) / "casos_exito.shp"
+        gdf.to_file(shp, driver="ESRI Shapefile", encoding="utf-8")
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in Path(tmpd).glob("casos_exito.*"): zf.write(p, arcname=p.name)
-        zbuf.seek(0); return zbuf.getvalue()
+            for p in Path(tmpd).glob("casos_exito.*"):
+                zf.write(p, arcname=p.name)
+        zbuf.seek(0)
+        return zbuf.getvalue()
 
-st.subheader("📤 Exportar a ArcGIS")
-fc, gdf = all_features_fc(), gdf_from_fc(all_features_fc())
+st.subheader("📤 Exportar a ArcGIS (todas las capas)")
+fc = all_features_fc()
+gdf = gdf_from_fc(fc)
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.download_button("⬇️ GeoJSON (todas las capas)", data=export_geojson_bytes(fc),
-                       file_name=f"{st.session_state.project_name}.geojson", mime="application/geo+json",
-                       disabled=(len(fc["features"]) == 0))
+    st.download_button(
+        "⬇️ GeoJSON",
+        data=export_geojson_bytes(fc),
+        file_name=f"{st.session_state.project_name}.geojson",
+        mime="application/geo+json",
+        disabled=(len(fc["features"]) == 0)
+    )
 with c2:
-    st.download_button("⬇️ Shapefile (ZIP)", data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
-                       file_name=f"{st.session_state.project_name}.zip", mime="application/zip",
-                       disabled=(len(fc["features"]) == 0))
+    st.download_button(
+        "⬇️ Shapefile (ZIP)",
+        data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
+        file_name=f"{st.session_state.project_name}.zip",
+        mime="application/zip",
+        disabled=(len(fc["features"]) == 0)
+    )
 with c3:
-    st.download_button("⬇️ CSV (atributos + lat/lon)", data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
-                       file_name=f"{st.session_state.project_name}.csv", mime="text/csv",
-                       disabled=(len(fc["features"]) == 0))
+    st.download_button(
+        "⬇️ CSV (atributos + lat/lon)",
+        data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
+        file_name=f"{st.session_state.project_name}.csv",
+        mime="text/csv",
+        disabled=(len(fc["features"]) == 0)
+    )
 
 st.info("➡️ **ArcGIS**: sube el **GeoJSON** o **ZIP (Shapefile)** como Feature Layer. Puedes simbolizar por **layer** (tipo de caso) o por **responsable** (GL/FP/Mixta).")

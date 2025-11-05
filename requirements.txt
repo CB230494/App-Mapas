@@ -5,6 +5,7 @@ shapely
 fiona
 folium
 streamlit-folium
+google.oauth2
 
 
 

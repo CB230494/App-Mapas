@@ -1,9 +1,11 @@
 streamlit
 pandas
-pydeck
 geopandas
 shapely
 fiona
+folium
+streamlit-folium
+
 
 
 

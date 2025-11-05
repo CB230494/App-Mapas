@@ -1,7 +1,10 @@
 streamlit
 pandas
-openpyxl
-python-dotenv
-supabase
+pydeck
+geopandas
+shapely
+fiona
+
+
 
 

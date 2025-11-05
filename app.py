@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-# Constructor de "Casos de Éxito" por capas (clic en mapa) + export a ArcGIS
+# Casos de Éxito – Capas, clic en mapa (marcar), modos de mapa y export a ArcGIS
 # Ejecuta: streamlit run app.py
 
-import io, json, zipfile, tempfile, base64, re
+import io, json, zipfile, tempfile, re
 from pathlib import Path
 from typing import Dict, List, Any
 
@@ -13,46 +13,55 @@ from shapely.geometry import Point
 
 import folium
 from streamlit_folium import st_folium
+from folium.plugins import Draw, MeasureControl, MiniMap
 
-# ==================== CONFIG INICIAL ====================
-st.set_page_config(page_title="Casos de Éxito – Constructor de Mapas", layout="wide")
-st.title("🌟 Casos de Éxito – Mapa interactivo por capas")
-st.caption("Haz clic en el mapa para agregar casos, organiza por capas y exporta a ArcGIS (GeoJSON/Shapefile/CSV).")
+# ==================== CONFIG ====================
+st.set_page_config(page_title="Casos de Éxito – Mapas", layout="wide")
+st.title("🌟 Casos de Éxito – Mapas por capas (clic para marcar)")
+st.caption("Haz clic o usa la herramienta de dibujo para agregar casos; elige mapa base; exporta GeoJSON/ZIP/CSV para ArcGIS.")
 
-# Estado
+# Estado inicial
 if "layers" not in st.session_state:
-    # capas predefinidas (puedes agregar más en la UI)
     st.session_state.layers: Dict[str, Dict[str, Any]] = {
         "Infraestructura recuperada": {"color": "#2ca02c", "visible": True, "features": []},
         "Prevención comunitaria":     {"color": "#1f77b4", "visible": True, "features": []},
         "Operativos y control":       {"color": "#ff7f0e", "visible": True, "features": []},
         "Gestión interinstitucional": {"color": "#9467bd", "visible": True, "features": []},
     }
-
 if "project_name" not in st.session_state:
     st.session_state.project_name = "casos_exito"
 
-def _hex_ok(h):
-    return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
-
+def _hex_ok(h): return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 def _clean_hex(h):
     h = (h or "#1f77b4").strip()
     if not h.startswith("#"): h = "#" + h
     return h if _hex_ok(h) else "#1f77b4"
 
-# ==================== SIDEBAR – PROYECTO / CAPAS ====================
+# ==================== SIDEBAR: PROYECTO / MAPAS BASE / CAPAS ====================
 st.sidebar.header("Proyecto")
 st.session_state.project_name = st.sidebar.text_input("Nombre del proyecto", st.session_state.project_name)
 
+st.sidebar.header("Mapa base")
+BASEMAPS = {
+    "Carto Claro":       ("CartoDB positron", {}),
+    "OSM Estándar":      ("OpenStreetMap", {}),
+    "Stamen Terreno":    ("Stamen Terrain", {}),
+    "Stamen Toner":      ("Stamen Toner", {}),
+    "Esri Satélite":     ("Esri.WorldImagery", {}),
+    "Esri Calles":       ("Esri.WorldStreetMap", {}),
+    "Esri Topográfico":  ("Esri.WorldTopoMap", {}),
+    "Esri Gray (Light)": ("Esri.WorldGrayCanvas", {}),
+    "Carto Dark":        ("CartoDB dark_matter", {}),
+}
+basemap_name = st.sidebar.selectbox("Elegir mapa base", list(BASEMAPS.keys()), index=0)
+
 st.sidebar.header("Capas (tipo de caso)")
-# Editar visibilidad/color y agregar capas nuevas
 for lname, meta in list(st.session_state.layers.items()):
     with st.sidebar.expander(lname, expanded=False):
         meta["visible"] = st.checkbox("Visible", value=meta.get("visible", True), key=f"vis_{lname}")
         meta["color"] = _clean_hex(st.color_picker("Color", value=meta.get("color", "#1f77b4"), key=f"col_{lname}"))
         if st.button("Eliminar capa", key=f"del_{lname}"):
-            del st.session_state.layers[lname]
-            st.rerun()
+            del st.session_state.layers[lname]; st.rerun()
 
 with st.sidebar.expander("➕ Agregar capa"):
     new_layer = st.text_input("Nombre de la nueva capa", "")
@@ -61,40 +70,45 @@ with st.sidebar.expander("➕ Agregar capa"):
         name = new_layer.strip()
         if name and name not in st.session_state.layers:
             st.session_state.layers[name] = {"color": _clean_hex(new_color), "visible": True, "features": []}
-            st.success(f"Capa '{name}' creada.")
-            st.rerun()
+            st.success(f"Capa '{name}' creada."); st.rerun()
 
-# ==================== FORMULARIO DE CASO ====================
-st.subheader("📝 Ficha del caso (aplica al próximo clic en el mapa)")
-cols = st.columns([1, 1, 1, 1])
-with cols[0]:
-    layer_active = st.selectbox("Capa activa", list(st.session_state.layers.keys()))
-with cols[1]:
-    titulo = st.text_input("Título", "Parque recuperado y seguro")
-with cols[2]:
-    fecha = st.date_input("Fecha")
-with cols[3]:
-    responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"])
+# ==================== FICHA DEL CASO (para el próximo punto) ====================
+st.subheader("📝 Ficha del caso (se aplica al próximo punto que marques)")
+c1, c2, c3, c4 = st.columns([1,1,1,1])
+with c1: layer_active = st.selectbox("Capa activa", list(st.session_state.layers.keys()))
+with c2: titulo = st.text_input("Título", "Parque recuperado y seguro")
+with c3: fecha = st.date_input("Fecha")
+with c4: responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"])
+desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.")[:240]
+d2a, d2b, d2c = st.columns([1,1,1])
+with d2a: provincia = st.text_input("Provincia", "San José")
+with d2b: canton = st.text_input("Cantón", "Montes de Oca")
+with d2c: impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses")
+enlace = st.text_input("Enlace a evidencia (opcional)", "")
 
-desc = st.text_area("Descripción corta (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes coordinados con comunidad.")[:240]
-colz = st.columns([1,1,1])
-with colz[0]:
-    provincia = st.text_input("Provincia", "San José")
-with colz[1]:
-    canton = st.text_input("Cantón", "Montes de Oca")
-with colz[2]:
-    impacto = st.text_input("Indicador de impacto (opcional)", "↓ 35% incidentes en 3 meses")
+# ==================== MAPA (con clic y con herramienta de dibujo) ====================
+st.subheader("🗺️ Mapa (clic o use la ✏️ herramienta de dibujo)")
+# Centro de CR
+center_lat, center_lon = 9.94, -84.10
+m = folium.Map(location=[center_lat, center_lon], zoom_start=7, control_scale=True)
 
-enlace = st.text_input("Enlace a evidencia (video/fotos/noticia)", "")
+# Mapa base principal seleccionado
+tile_id, tile_opts = BASEMAPS[basemap_name]
+folium.TileLayer(tile_id, name=basemap_name, **tile_opts, control=False).add_to(m)
 
-st.caption("Consejo: deja prellenada esta ficha, luego haz clic en el mapa sobre la ubicación del caso. Cada clic crea un punto en la **capa activa** con esta ficha.")
+# Extras: capas base alternas (para activar desde el control, opcional)
+for nm, (tid, topts) in BASEMAPS.items():
+    if nm != basemap_name:
+        folium.TileLayer(tid, name=nm, **topts).add_to(m)
 
-# ==================== MAPA Y CAPTURA DE CLIC ====================
-st.subheader("🗺️ Mapa (clic para agregar caso)")
-# Centro de CR aprox.
-m = folium.Map(location=[9.94, -84.10], zoom_start=7, tiles="cartodbpositron")
+# Controles útiles
+folium.plugins.Fullscreen(position="topleft").add_to(m)
+m.add_child(MiniMap(toggle_display=True))
+m.add_child(MeasureControl(primary_length_unit="meters", secondary_length_unit="kilometers",
+                           primary_area_unit="sqmeters", secondary_area_unit="hectares"))
+folium.LatLngPopup().add_to(m)  # muestra lat/lon al hacer clic
 
-# Dibujar capas existentes
+# Dibujar las capas existentes
 for lname, meta in st.session_state.layers.items():
     if not meta.get("visible", True): 
         continue
@@ -102,7 +116,6 @@ for lname, meta in st.session_state.layers.items():
     for feat in meta.get("features", []):
         lat, lon = feat["geometry"]["coordinates"][1], feat["geometry"]["coordinates"][0]
         props = feat["properties"]
-        # Popup HTML corto y elegante
         html = f"""
         <b>{props.get('titulo','(sin título)')}</b><br>
         <i>{props.get('fecha','')}</i><br>
@@ -115,26 +128,35 @@ for lname, meta in st.session_state.layers.items():
         """
         folium.CircleMarker(
             location=[lat, lon],
-            radius=8,
-            color=meta["color"],
-            fill=True,
-            fill_color=meta["color"],
-            fill_opacity=0.85,
-            popup=folium.Popup(html, max_width=320, show=False),
-            tooltip=props.get('titulo', '(Caso)')
+            radius=8, color=meta["color"], fill=True, fill_color=meta["color"], fill_opacity=0.9,
+            popup=folium.Popup(html, max_width=320), tooltip=props.get('titulo', '(Caso)')
         ).add_to(fg)
     fg.add_to(m)
 
+# Control de capas (incluye mapas base y grupos)
 folium.LayerControl(collapsed=False).add_to(m)
 
-# Render interactivo y captura del último clic
-map_state = st_folium(m, height=650, width=None, returned_objects=[])
+# ✏️ Herramienta de dibujo (Marker/Point, Line, Polygon, Rectangle)
+Draw(
+    draw_options={
+        "polyline": False,  # si luego quieres líneas, pon True
+        "polygon": False,   # ídem polígonos
+        "rectangle": False,
+        "circle": False,
+        "marker": True,     # <- marcadores activados
+        "circlemarker": False,
+    },
+    edit_options={"edit": False, "remove": False},
+).add_to(m)
 
-# ¿Hubo clic?
-if map_state and map_state.get("last_clicked"):
-    lat = map_state["last_clicked"]["lat"]
-    lon = map_state["last_clicked"]["lng"]
-    # Construir feature (GeoJSON-like)
+# Render y captura de eventos (soporta 'last_clicked' y 'last_active_drawing')
+map_state = st_folium(
+    m, height=650, width=None,
+    key="mapa_casos",
+    feature_group_to_add=None
+)
+
+def _build_feature(lon: float, lat: float) -> Dict[str, Any]:
     props = {
         "layer": layer_active,
         "color": st.session_state.layers[layer_active]["color"],
@@ -147,14 +169,32 @@ if map_state and map_state.get("last_clicked"):
         "impacto": impacto.strip(),
         "enlace": enlace.strip()
     }
-    feat = {
-        "type": "Feature",
-        "properties": props,
-        "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]}
-    }
-    st.session_state.layers[layer_active]["features"].append(feat)
-    st.success(f"Caso agregado en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
+    return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]}}
+
+# 1) Clic simple (en cualquier parte del mapa)
+if map_state and map_state.get("last_clicked"):
+    lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
+    st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat))
+    st.success(f"Punto agregado con clic en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
     st.rerun()
+
+# 2) Dibujo de marcador (botón ✏️ -> marcador)
+# streamlit-folium devuelve esto en diferentes claves según versión:
+drawn = None
+for key in ["last_active_drawing", "last_drawn_feature", "last_drawing"]:
+    if map_state and map_state.get(key):
+        drawn = map_state[key]; break
+if drawn:
+    # Esperamos un dict GeoJSON; para marker, geometry: Point [lon, lat]
+    try:
+        geom = drawn.get("geometry", {})
+        if geom.get("type") == "Point":
+            lon, lat = geom["coordinates"]
+            st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat))
+            st.success(f"Punto agregado con la herramienta de dibujo en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
+            st.rerun()
+    except Exception:
+        pass
 
 # ==================== TABLAS Y GESTIÓN ====================
 st.subheader("📋 Resumen por capas")
@@ -182,22 +222,18 @@ for i, lname in enumerate(st.session_state.layers.keys()):
             with colx:
                 idx_del = st.number_input("Eliminar fila (índice)", min_value=0, max_value=len(df)-1, value=0, step=1, key=f"idx_{lname}")
                 if st.button("🗑️ Eliminar", key=f"btn_del_{lname}"):
-                    st.session_state.layers[lname]["features"].pop(int(idx_del))
-                    st.rerun()
+                    st.session_state.layers[lname]["features"].pop(int(idx_del)); st.rerun()
             with coly:
                 if st.button("🧹 Vaciar capa", key=f"btn_clear_{lname}"):
-                    st.session_state.layers[lname]["features"].clear()
-                    st.rerun()
+                    st.session_state.layers[lname]["features"].clear(); st.rerun()
 
 st.divider()
 
 # ==================== EXPORTADORES ====================
 def all_features_fc() -> Dict[str, Any]:
-    """FeatureCollection de todas las capas con propiedad 'layer'."""
     feats = []
     for lname, meta in st.session_state.layers.items():
-        for f in meta.get("features", []):
-            feats.append(f)
+        feats.extend(meta.get("features", []))
     return {"type":"FeatureCollection","features":feats}
 
 def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
@@ -206,66 +242,36 @@ def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame(columns=["layer","color","titulo","desc","fecha","provincia","canton","responsable","impacto","enlace","geometry"], geometry="geometry", crs="EPSG:4326")
     recs = []
     for f in feats:
-        p = f["properties"]
-        lon, lat = f["geometry"]["coordinates"]
-        rec = {**p, "geometry": Point(lon, lat)}
-        recs.append(rec)
-    gdf = gpd.GeoDataFrame(recs, crs="EPSG:4326")
-    return gdf
+        p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
+        recs.append({**p, "geometry": Point(lon, lat)})
+    return gpd.GeoDataFrame(recs, crs="EPSG:4326")
 
-def export_geojson_bytes(fc: Dict[str, Any]) -> bytes:
-    return json.dumps(fc, ensure_ascii=False).encode("utf-8")
-
+def export_geojson_bytes(fc: Dict[str, Any]) -> bytes: return json.dumps(fc, ensure_ascii=False).encode("utf-8")
 def export_csv_bytes(gdf: gpd.GeoDataFrame) -> bytes:
-    df = pd.DataFrame(gdf.drop(columns="geometry"))
-    df["lat"] = gdf.geometry.y
-    df["lon"] = gdf.geometry.x
+    df = pd.DataFrame(gdf.drop(columns="geometry")); df["lat"] = gdf.geometry.y; df["lon"] = gdf.geometry.x
     return df.to_csv(index=False).encode("utf-8")
-
 def export_shapefile_zip_bytes(gdf: gpd.GeoDataFrame) -> bytes:
     with tempfile.TemporaryDirectory() as tmpd:
-        shp = Path(tmpd) / "casos_exito.shp"
-        gdf.to_file(shp, driver="ESRI Shapefile", encoding="utf-8")
+        shp = Path(tmpd) / "casos_exito.shp"; gdf.to_file(shp, driver="ESRI Shapefile", encoding="utf-8")
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in Path(tmpd).glob("casos_exito.*"):
-                zf.write(p, arcname=p.name)
-        zbuf.seek(0)
-        return zbuf.getvalue()
+            for p in Path(tmpd).glob("casos_exito.*"): zf.write(p, arcname=p.name)
+        zbuf.seek(0); return zbuf.getvalue()
 
 st.subheader("📤 Exportar a ArcGIS")
-fc = all_features_fc()
-gdf = gdf_from_fc(fc)
-
+fc, gdf = all_features_fc(), gdf_from_fc(all_features_fc())
 c1, c2, c3 = st.columns(3)
 with c1:
-    st.download_button(
-        "⬇️ GeoJSON (todas las capas)",
-        data=export_geojson_bytes(fc),
-        file_name=f"{st.session_state.project_name}.geojson",
-        mime="application/geo+json",
-        disabled=(len(fc["features"]) == 0)
-    )
+    st.download_button("⬇️ GeoJSON (todas las capas)", data=export_geojson_bytes(fc),
+                       file_name=f"{st.session_state.project_name}.geojson", mime="application/geo+json",
+                       disabled=(len(fc["features"]) == 0))
 with c2:
-    st.download_button(
-        "⬇️ Shapefile (ZIP)",
-        data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
-        file_name=f"{st.session_state.project_name}.zip",
-        mime="application/zip",
-        disabled=(len(fc["features"]) == 0)
-    )
+    st.download_button("⬇️ Shapefile (ZIP)", data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
+                       file_name=f"{st.session_state.project_name}.zip", mime="application/zip",
+                       disabled=(len(fc["features"]) == 0))
 with c3:
-    st.download_button(
-        "⬇️ CSV (atributos + lat/lon)",
-        data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
-        file_name=f"{st.session_state.project_name}.csv",
-        mime="text/csv",
-        disabled=(len(fc["features"]) == 0)
-    )
+    st.download_button("⬇️ CSV (atributos + lat/lon)", data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
+                       file_name=f"{st.session_state.project_name}.csv", mime="text/csv",
+                       disabled=(len(fc["features"]) == 0))
 
-st.info(
-    "➡️ **Uso en ArcGIS**: Sube el **GeoJSON** o el **ZIP (Shapefile)** como *Feature Layer* a ArcGIS Online/Pro. "
-    "La propiedad **layer** conserva qué tipo de caso es; puedes simbolizar por capa o por responsable (GL/FP/Mixta). "
-    "El CSV sirve para cargas rápidas; ArcGIS infiere la geolocalización con lat/lon."
-)
-
+st.info("➡️ **ArcGIS**: sube el **GeoJSON** o **ZIP (Shapefile)** como Feature Layer. Puedes simbolizar por **layer** (tipo de caso) o por **responsable** (GL/FP/Mixta).")

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-# Casos de Éxito – Capas, edición, Heatmap y Dashboard + export a ArcGIS
+# Casos de Éxito – Capas, edición, Heatmap, Dashboard, Filtros Prov→Cantón y Google Sheets
 # Ejecuta: streamlit run app.py
 
-import io, json, zipfile, tempfile, re, datetime as dt
+import io, json, zipfile, tempfile, re, datetime as dt, uuid
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -16,10 +16,19 @@ from streamlit_folium import st_folium
 from folium.plugins import Draw, MeasureControl, MiniMap, HeatMap
 from folium.plugins import BeautifyIcon
 
+# ====== Opcional: Google Sheets ======
+HAS_SHEETS = False
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    HAS_SHEETS = True
+except Exception:
+    HAS_SHEETS = False
+
 # ==================== CONFIG ====================
 st.set_page_config(page_title="Casos de Éxito – Mapas", layout="wide")
 st.title("🌟 Casos de Éxito – Mapas por capas")
-st.caption("Marca puntos (clic o ✏️), edita, usa Heatmap y consulta el Dashboard. Exporta GeoJSON/ZIP/CSV para ArcGIS.")
+st.caption("Marca puntos (clic o ✏️), edita, Heatmap, filtros Provincia→Cantón y Dashboard. Exporta GeoJSON/ZIP/CSV. Conecta a Google Sheets (opcional).")
 
 # ---------- Estado inicial ----------
 if "layers" not in st.session_state:
@@ -32,8 +41,9 @@ if "layers" not in st.session_state:
 if "project_name" not in st.session_state:
     st.session_state.project_name = "casos_exito"
 if "move_target" not in st.session_state:
-    # None o tuple (layer_name, index) para mover por clic
-    st.session_state.move_target: Optional[tuple] = None
+    st.session_state.move_target: Optional[tuple] = None  # (layer, index)
+if "sheets_ready" not in st.session_state:
+    st.session_state.sheets_ready = False
 
 def _hex_ok(h): return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 def _clean_hex(h):
@@ -41,7 +51,7 @@ def _clean_hex(h):
     if not h.startswith("#"): h = "#" + h
     return h if _hex_ok(h) else "#1f77b4"
 
-# ==================== SIDEBAR: Proyecto & capas ====================
+# ==================== SIDEBAR: Proyecto / Mapas base / Capas ====================
 st.sidebar.header("Proyecto")
 st.session_state.project_name = st.sidebar.text_input("Nombre del proyecto", st.session_state.project_name)
 
@@ -103,13 +113,14 @@ with st.sidebar.expander("➕ Agregar capa"):
             st.session_state.layers[name] = {"color": _clean_hex(new_color), "visible": True, "features": []}
             st.success(f"Capa '{name}' creada."); st.rerun()
 
-# ==================== Tabs principales ====================
-tab_mapa, tab_dashboard, tab_export = st.tabs(["🗺️ Mapa", "📊 Dashboard", "📤 Exportar"])
+# ==================== Tabs ====================
+tab_mapa, tab_dashboard, tab_export, tab_sheets = st.tabs(["🗺️ Mapa", "📊 Dashboard", "📤 Exportar", "📡 Google Sheets"])
 
-# ==================== Utilidades comunes ====================
+# ==================== Utilidades ====================
 def feature_to_row(f: Dict[str, Any]) -> Dict[str, Any]:
     p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
     return {
+        "id": p.get("id",""),
         "Capa": p.get("layer",""),
         "Título": p.get("titulo",""),
         "Fecha": p.get("fecha",""),
@@ -130,18 +141,38 @@ def all_features_fc() -> Dict[str, Any]:
 def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
     feats = fc["features"]
     if not feats:
-        return gpd.GeoDataFrame(columns=["layer","color","titulo","desc","fecha","provincia","canton","responsable","impacto","enlace","geometry"], geometry="geometry", crs="EPSG:4326")
+        return gpd.GeoDataFrame(columns=["id","layer","color","titulo","desc","fecha","provincia","canton","responsable","impacto","enlace","geometry"], geometry="geometry", crs="EPSG:4326")
     recs = []
     for f in feats:
         p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
         recs.append({**p, "geometry": Point(lon, lat)})
     return gpd.GeoDataFrame(recs, crs="EPSG:4326")
 
+def _new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
 def _build_feature(lon: float, lat: float, props: Dict[str, Any]) -> Dict[str, Any]:
+    if not props.get("id"):
+        props["id"] = _new_id()
     return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]}}
 
-# ==================== 🗺️ MAPA ====================
+def current_df() -> pd.DataFrame:
+    fc = all_features_fc()
+    feats = fc["features"]
+    if not feats: return pd.DataFrame(columns=["id","Capa","Título","Fecha","Resp","Provincia","Cantón","Impacto","Evidencia","Lat","Lon"])
+    return pd.DataFrame([feature_to_row(f) for f in feats])
+
+# =============== 🗺️ MAPA (con filtros Prov→Cantón) ===============
 with tab_mapa:
+    st.subheader("Filtros de visualización")
+    df_all = current_df()
+    # Valores únicos actuales
+    provs = sorted([p for p in df_all["Provincia"].dropna().unique().tolist() if p != ""])
+    # Cascada: Cantón depende de Provincia
+    provincia_f = st.selectbox("Provincia", ["(todas)"] + provs, index=0)
+    cantones_unq = sorted(df_all.loc[(df_all["Provincia"] == provincia_f) if provincia_f != "(todas)" else df_all.index, "Cantón"].dropna().unique().tolist())
+    canton_f = st.selectbox("Cantón", ["(todos)"] + cantones_unq, index=0)
+
     st.subheader("📝 Ficha del caso (se aplica al próximo punto que marques)")
     c1, c2, c3, c4 = st.columns([1,1,1,1])
     with c1: layer_active = st.selectbox("Capa activa", list(st.session_state.layers.keys()))
@@ -150,22 +181,20 @@ with tab_mapa:
     with c4: responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"])
     desc = st.text_area("Descripción (máx. 240)", "Rehabilitación de iluminación y mobiliario; patrullajes comunitarios.")[:240]
     d2a, d2b, d2c = st.columns([1,1,1])
-    with d2a: provincia = st.text_input("Provincia", "San José")
-    with d2b: canton = st.text_input("Cantón", "Montes de Oca")
+    with d2a: provincia = st.text_input("Provincia", provincia_f if provincia_f != "(todas)" else "San José")
+    with d2b: canton = st.text_input("Cantón", canton_f if canton_f != "(todos)" else "Montes de Oca")
     with d2c: impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses")
     enlace = st.text_input("Enlace a evidencia (opcional)", "")
 
     st.divider()
     colx, coly = st.columns([1,1])
     with colx:
-        use_heat = st.checkbox("🔥 Mostrar Heatmap (todas las capas)", value=False)
+        use_heat = st.checkbox("🔥 Mostrar Heatmap (filtrado)", value=False)
         heat_radius = st.slider("Radio Heatmap", 10, 60, 25, 1)
     with coly:
-        st.write(" ")  # espacio
-        move_lbl = "🔀 Mover por clic: " + (f"{st.session_state.move_target}" if st.session_state.move_target else "inactivo")
-        st.caption(move_lbl)
+        st.caption("🔀 Mover por clic: " + (f"{st.session_state.move_target}" if st.session_state.move_target else "inactivo"))
 
-    # --- Mapa base ---
+    # --- Construir mapa base ---
     center_lat, center_lon = 9.94, -84.10
     m = folium.Map(location=[center_lat, center_lon], zoom_start=7, control_scale=True)
     bm = BASEMAPS[basemap_name]
@@ -181,7 +210,13 @@ with tab_mapa:
                             primary_area_unit="sqmeters", secondary_area_unit="hectares"))
     folium.LatLngPopup().add_to(m)
 
-    # Dibujar puntos por capa (marcador tipo "viñeta" con BeautifyIcon)
+    # Filtro función
+    def pass_filter(props: Dict[str, Any]) -> bool:
+        if provincia_f != "(todas)" and props.get("provincia","") != provincia_f: return False
+        if canton_f != "(todos)" and props.get("canton","") != canton_f: return False
+        return True
+
+    # Dibujar puntos por capa (viñeta)
     all_points_for_heat = []
     for lname, meta in st.session_state.layers.items():
         if not meta.get("visible", True): 
@@ -189,8 +224,10 @@ with tab_mapa:
         fg = folium.FeatureGroup(name=lname, show=True)
         color = _clean_hex(meta["color"])
         for idx, feat in enumerate(meta.get("features", [])):
-            lat, lon = feat["geometry"]["coordinates"][1], feat["geometry"]["coordinates"][0]
             props = feat["properties"]
+            if not pass_filter(props): 
+                continue
+            lat, lon = feat["geometry"]["coordinates"][1], feat["geometry"]["coordinates"][0]
             html = f"""
             <b>{props.get('titulo','(sin título)')}</b><br>
             <i>{props.get('fecha','')}</i><br>
@@ -201,41 +238,27 @@ with tab_mapa:
             <hr style="margin:4px 0;">
             {props.get('desc','')}
             """
-            icon = BeautifyIcon(
-                icon="circle",
-                icon_shape="marker",        # <- forma de "viñeta"/pin
-                text_color="white",
-                background_color=color,
-                border_color=color,
-                spin=False
-            )
-            folium.Marker(
-                location=[lat, lon],
-                icon=icon,
-                tooltip=props.get('titulo', '(Caso)'),
-                popup=folium.Popup(html, max_width=320),
-            ).add_to(fg)
+            icon = BeautifyIcon(icon="circle", icon_shape="marker", text_color="white",
+                                background_color=color, border_color=color, spin=False)
+            folium.Marker(location=[lat, lon], icon=icon, tooltip=props.get('titulo','(Caso)'),
+                          popup=folium.Popup(html, max_width=320)).add_to(fg)
             all_points_for_heat.append([lat, lon, 1])
         fg.add_to(m)
 
-    # Heatmap opcional
     if use_heat and all_points_for_heat:
         HeatMap(all_points_for_heat, radius=heat_radius, blur=25, min_opacity=0.3, name="Heatmap").add_to(m)
 
-    # Control de capas
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Herramienta de dibujo (solo marcador)
-    Draw(
-        draw_options={"polyline": False, "polygon": False, "rectangle": False, "circle": False, "marker": True, "circlemarker": False},
-        edit_options={"edit": False, "remove": False},
-    ).add_to(m)
+    Draw(draw_options={"polyline": False, "polygon": False, "rectangle": False, "circle": False,
+                       "marker": True, "circlemarker": False},
+         edit_options={"edit": False, "remove": False}).add_to(m)
 
-    # Render y eventos
     map_state = st_folium(m, height=650, width=None, key="mapa_casos", feature_group_to_add=None)
 
-    # Construir propiedades base
+    # Propiedades base para alta
     new_props = {
+        "id": _new_id(),
         "layer": layer_active,
         "color": _clean_hex(st.session_state.layers[layer_active]["color"]),
         "titulo": titulo.strip(),
@@ -248,26 +271,23 @@ with tab_mapa:
         "enlace": enlace.strip()
     }
 
-    # --- Alta de punto por clic (si NO estamos moviendo) ---
+    # Alta por clic (si no hay mover activo)
     if st.session_state.move_target is None and map_state and map_state.get("last_clicked"):
         lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
         st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, new_props))
-        st.success(f"Punto agregado con clic en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
-        st.rerun()
+        st.success(f"Punto agregado: '{layer_active}' ({lat:.5f}, {lon:.5f})."); st.rerun()
 
-    # --- Alta de punto por herramienta de dibujo ---
+    # Alta por herramienta de dibujo
     drawn = None
     for key in ["last_active_drawing", "last_drawn_feature", "last_drawing"]:
-        if map_state and map_state.get(key):
-            drawn = map_state[key]; break
+        if map_state and map_state.get(key): drawn = map_state[key]; break
     if st.session_state.move_target is None and drawn:
         try:
             geom = drawn.get("geometry", {})
             if geom.get("type") == "Point":
                 lon, lat = geom["coordinates"]
                 st.session_state.layers[layer_active]["features"].append(_build_feature(lon, lat, new_props))
-                st.success(f"Punto agregado (✏️) en '{layer_active}' ({lat:.5f}, {lon:.5f}).")
-                st.rerun()
+                st.success(f"Punto agregado (✏️): '{layer_active}' ({lat:.5f}, {lon:.5f})."); st.rerun()
         except Exception:
             pass
 
@@ -281,20 +301,26 @@ with tab_mapa:
                 st.info("Sin casos aún.")
             else:
                 df = pd.DataFrame([feature_to_row(f) for f in feats])
+                # Aplicar filtro también en tabla (para contexto)
+                if provincia_f != "(todas)":
+                    df = df[df["Provincia"] == provincia_f]
+                if canton_f != "(todos)":
+                    df = df[df["Cantón"] == canton_f]
+
                 st.dataframe(df, use_container_width=True)
 
                 colx, coly, colz = st.columns([1,1,1])
                 # Eliminar
                 with colx:
-                    idx_del = st.number_input("Eliminar fila (índice)", min_value=0, max_value=len(df)-1, value=0, step=1, key=f"idx_del_{lname}")
+                    idx_del = st.number_input("Eliminar (índice)", min_value=0, max_value=len(feats)-1, value=0, step=1, key=f"idx_del_{lname}")
                     if st.button("🗑️ Eliminar", key=f"btn_del_{lname}"):
                         st.session_state.layers[lname]["features"].pop(int(idx_del)); st.rerun()
 
-                # EDITAR atributos
+                # Editar atributos
                 with coly:
                     st.markdown("**Editar atributos**")
-                    idx_edit = st.number_input("Índice", min_value=0, max_value=len(df)-1, value=0, step=1, key=f"idx_edit_{lname}")
-                    f = feats[int(idx_edit)]  # original
+                    idx_edit = st.number_input("Índice", min_value=0, max_value=len(feats)-1, value=0, step=1, key=f"idx_edit_{lname}")
+                    f = feats[int(idx_edit)]
                     with st.form(f"edit_form_{lname}"):
                         p = f["properties"]
                         t = st.text_input("Título", p.get("titulo",""))
@@ -305,85 +331,80 @@ with tab_mapa:
                         imp  = st.text_input("Impacto", p.get("impacto",""))
                         enl  = st.text_input("Enlace", p.get("enlace",""))
                         des  = st.text_area("Descripción", p.get("desc",""))
-                        submitted = st.form_submit_button("💾 Guardar cambios")
+                        submitted = st.form_submit_button("💾 Guardar")
                     if submitted:
-                        p.update({
-                            "titulo": t.strip(),
-                            "fecha": str(fe),
-                            "responsable": resp,
-                            "provincia": prov.strip(),
-                            "canton": cant.strip(),
-                            "impacto": imp.strip(),
-                            "enlace": enl.strip(),
-                            "desc": des.strip(),
-                        })
+                        p.update({"titulo": t.strip(), "fecha": str(fe), "responsable": resp,
+                                  "provincia": prov.strip(), "canton": cant.strip(),
+                                  "impacto": imp.strip(), "enlace": enl.strip(), "desc": des.strip()})
                         st.success("Caso actualizado."); st.rerun()
 
-                # MOVER por clic
+                # Mover
                 with colz:
                     st.markdown("**Mover ubicación**")
-                    idx_move = st.number_input("Índice", min_value=0, max_value=len(df)-1, value=0, step=1, key=f"idx_move_{lname}")
+                    idx_move = st.number_input("Índice", min_value=0, max_value=len(feats)-1, value=0, step=1, key=f"idx_move_{lname}")
                     if st.button("🔀 Activar mover por clic", key=f"btn_move_{lname}"):
-                        st.session_state.move_target = (lname, int(idx_move))
-                        st.info("Ahora haz clic en el mapa donde quieras mover el caso.")
-                    if st.button("❌ Cancelar mover", key=f"btn_cancel_move_{lname}"):
+                        st.session_state.move_target = (lname, int(idx_move)); st.info("Haz clic en el mapa para mover.")
+                    if st.button("❌ Cancelar", key=f"btn_cancel_move_{lname}"):
                         st.session_state.move_target = None; st.rerun()
 
-    # --- Capturar clic para mover, si hay objetivo activo ---
+    # Aplicar movimiento
     if st.session_state.move_target and map_state and map_state.get("last_clicked"):
         lat = map_state["last_clicked"]["lat"]; lon = map_state["last_clicked"]["lng"]
         lname, idx = st.session_state.move_target
         st.session_state.layers[lname]["features"][idx]["geometry"]["coordinates"] = [float(lon), float(lat)]
         st.session_state.move_target = None
-        st.success(f"Ubicación actualizada a ({lat:.5f}, {lon:.5f}).")
-        st.rerun()
+        st.success(f"Ubicación actualizada a ({lat:.5f}, {lon:.5f})."); st.rerun()
 
-# ==================== 📊 DASHBOARD ====================
+# =============== 📊 DASHBOARD (con filtros por capa + Prov/Cantón) ===============
 with tab_dashboard:
-    st.subheader("Resumen de registros")
-    fc = all_features_fc()
-    feats = fc["features"]
-    if not feats:
+    st.subheader("Filtros")
+    df = current_df()
+    if df.empty:
         st.info("Aún no hay datos para graficar.")
     else:
-        df = pd.DataFrame([feature_to_row(f) for f in feats])
-        # Normalizaciones
-        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-        df["Año-Mes"] = df["Fecha"].dt.to_period("M").astype(str)
+        capas = sorted(df["Capa"].unique().tolist())
+        capa_f = st.multiselect("Capas", capas, default=capas)
+        provs = sorted([p for p in df["Provincia"].dropna().unique().tolist() if p != ""])
+        provincia_f = st.selectbox("Provincia", ["(todas)"] + provs, index=0)
+        cantones = sorted(df[df["Provincia"] == provincia_f]["Cantón"].dropna().unique().tolist()) if provincia_f != "(todas)" else sorted(df["Cantón"].dropna().unique().tolist())
+        canton_f = st.selectbox("Cantón", ["(todos)"] + cantones, index=0)
+
+        fdf = df[df["Capa"].isin(capa_f)].copy()
+        if provincia_f != "(todas)": fdf = fdf[fdf["Provincia"] == provincia_f]
+        if canton_f != "(todos)":   fdf = fdf[fdf["Cantón"] == canton_f]
+
+        fdf["Fecha"] = pd.to_datetime(fdf["Fecha"], errors="coerce")
+        fdf["Año-Mes"] = fdf["Fecha"].dt.to_period("M").astype(str)
 
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Casos por capa**")
-            st.bar_chart(df.groupby("Capa")["Título"].count().sort_values(ascending=False))
+            st.bar_chart(fdf.groupby("Capa")["Título"].count().sort_values(ascending=False))
         with c2:
             st.markdown("**Casos por responsable (GL/FP/Mixta)**")
-            st.bar_chart(df.groupby("Resp")["Título"].count().reindex(["GL","FP","Mixta"]).fillna(0))
+            st.bar_chart(fdf.groupby("Resp")["Título"].count().reindex(["GL","FP","Mixta"]).fillna(0))
 
         c3, c4 = st.columns(2)
         with c3:
             st.markdown("**Casos por provincia**")
-            st.bar_chart(df.groupby("Provincia")["Título"].count().sort_values(ascending=False))
+            st.bar_chart(fdf.groupby("Provincia")["Título"].count().sort_values(ascending=False))
         with c4:
             st.markdown("**Serie temporal (mensual)**")
-            st.line_chart(df.groupby("Año-Mes")["Título"].count())
+            st.line_chart(fdf.groupby("Año-Mes")["Título"].count())
 
-        st.divider()
-        st.markdown("**Tabla completa**")
-        st.dataframe(df, use_container_width=True)
+        st.divider(); st.markdown("**Tabla (filtrada)**")
+        st.dataframe(fdf, use_container_width=True)
 
-# ==================== 📤 EXPORTAR ====================
+# =============== 📤 EXPORTAR ===============
 with tab_export:
     st.subheader("Exportar a ArcGIS (todas las capas)")
-    fc = all_features_fc()
-    gdf = gdf_from_fc(fc)
+    fc = all_features_fc(); gdf = gdf_from_fc(fc)
 
     def export_geojson_bytes(fc: Dict[str, Any]) -> bytes: 
         return json.dumps(fc, ensure_ascii=False).encode("utf-8")
 
     def export_csv_bytes(gdf: gpd.GeoDataFrame) -> bytes:
-        df = pd.DataFrame(gdf.drop(columns="geometry"))
-        df["lat"] = gdf.geometry.y
-        df["lon"] = gdf.geometry.x
+        df = pd.DataFrame(gdf.drop(columns="geometry")); df["lat"] = gdf.geometry.y; df["lon"] = gdf.geometry.x
         return df.to_csv(index=False).encode("utf-8")
 
     def export_shapefile_zip_bytes(gdf: gpd.GeoDataFrame) -> bytes:
@@ -394,33 +415,97 @@ with tab_export:
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in Path(tmpd).glob("casos_exito.*"):
                     zf.write(p, arcname=p.name)
-            zbuf.seek(0)
-            return zbuf.getvalue()
+            zbuf.seek(0); return zbuf.getvalue()
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.download_button(
-            "⬇️ GeoJSON",
-            data=export_geojson_bytes(fc),
-            file_name=f"{st.session_state.project_name}.geojson",
-            mime="application/geo+json",
-            disabled=(len(fc["features"]) == 0)
-        )
+        st.download_button("⬇️ GeoJSON", data=export_geojson_bytes(fc),
+                           file_name=f"{st.session_state.project_name}.geojson", mime="application/geo+json",
+                           disabled=(len(fc["features"]) == 0))
     with c2:
-        st.download_button(
-            "⬇️ Shapefile (ZIP)",
-            data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
-            file_name=f"{st.session_state.project_name}.zip",
-            mime="application/zip",
-            disabled=(len(fc["features"]) == 0)
-        )
+        st.download_button("⬇️ Shapefile (ZIP)", data=export_shapefile_zip_bytes(gdf) if len(fc["features"]) else b"",
+                           file_name=f"{st.session_state.project_name}.zip", mime="application/zip",
+                           disabled=(len(fc["features"]) == 0))
     with c3:
-        st.download_button(
-            "⬇️ CSV (atributos + lat/lon)",
-            data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
-            file_name=f"{st.session_state.project_name}.csv",
-            mime="text/csv",
-            disabled=(len(fc["features"]) == 0)
-        )
+        st.download_button("⬇️ CSV (atributos + lat/lon)", data=export_csv_bytes(gdf) if len(fc["features"]) else b"",
+                           file_name=f"{st.session_state.project_name}.csv", mime="text/csv",
+                           disabled=(len(fc["features"]) == 0))
 
-    st.info("➡️ **ArcGIS**: sube el **GeoJSON** o **ZIP (Shapefile)** como Feature Layer. Simboliza por **Capa** o **Resp**.")
+# =============== 📡 GOOGLE SHEETS ===============
+with tab_sheets:
+    st.subheader("Conexión a Google Sheets")
+    if not HAS_SHEETS:
+        st.warning("Instala dependencias y configura secrets para usar Google Sheets: `gspread` y `google-auth`. La app funciona sin Sheets.")
+    else:
+        try:
+            # Crear cliente desde secrets
+            sa_info = st.secrets["google_service_account"]
+            creds = Credentials.from_service_account_info(sa_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+            gc = gspread.authorize(creds)
+            sh = gc.open_by_key(st.secrets["SHEETS_SPREADSHEET_ID"])
+            ws = sh.worksheet(st.secrets.get("SHEETS_WORKSHEET_NAME", "Hoja 1"))
+            st.session_state.sheets_ready = True
+        except Exception as e:
+            st.error(f"No se pudo conectar: {e}")
+            st.session_state.sheets_ready = False
+
+        st.caption("Estructura: id, layer, color, titulo, desc, fecha, provincia, canton, responsable, impacto, enlace, lat, lon")
+        c1, c2 = st.columns(2)
+
+        def rows_from_app() -> List[List[Any]]:
+            fc = all_features_fc()
+            rows = [["id","layer","color","titulo","desc","fecha","provincia","canton","responsable","impacto","enlace","lat","lon"]]
+            for f in fc["features"]:
+                p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
+                rows.append([p.get("id",""), p.get("layer",""), p.get("color",""), p.get("titulo",""), p.get("desc",""),
+                             p.get("fecha",""), p.get("provincia",""), p.get("canton",""), p.get("responsable",""),
+                             p.get("impacto",""), p.get("enlace",""), lat, lon])
+            return rows
+
+        def app_from_rows(rows: List[List[Any]]):
+            # rows incluye encabezados en [0]
+            layers = {}
+            for r in rows[1:]:
+                if not r or len(r) < 13: continue
+                _id, layer, color, titulo, desc, fecha, provincia, canton, resp, impacto, enlace, lat, lon = r
+                color = _clean_hex(color or "#1f77b4")
+                feat = {
+                    "type":"Feature",
+                    "properties":{
+                        "id": _id or _new_id(), "layer": layer, "color": color, "titulo": str(titulo or ""),
+                        "desc": str(desc or ""), "fecha": str(fecha or ""), "provincia": str(provincia or ""),
+                        "canton": str(canton or ""), "responsable": str(resp or ""), "impacto": str(impacto or ""),
+                        "enlace": str(enlace or "")
+                    },
+                    "geometry":{"type":"Point","coordinates":[float(lon), float(lat)]}
+                }
+                if layer not in layers:
+                    layers[layer] = {"color": color, "visible": True, "features": []}
+                layers[layer]["features"].append(feat)
+                # Mantener color del primer registro por capa
+                if "color" not in layers[layer] or not layers[layer]["color"]:
+                    layers[layer]["color"] = color
+            st.session_state.layers = layers
+
+        with c1:
+            if st.session_state.sheets_ready and st.button("⬇️ Cargar desde Google Sheets"):
+                try:
+                    values = ws.get_all_values()
+                    if values:
+                        app_from_rows(values)
+                        st.success("Datos cargados desde Sheets a la app.")
+                        st.rerun()
+                    else:
+                        st.info("La hoja está vacía.")
+                except Exception as e:
+                    st.error(f"Error al leer: {e}")
+
+        with c2:
+            if st.session_state.sheets_ready and st.button("⬆️ Subir (reemplaza en Sheets)"):
+                try:
+                    rows = rows_from_app()
+                    ws.clear()
+                    ws.update("A1", rows)
+                    st.success("Datos subidos. (Se reemplazó el contenido de la hoja)")
+                except Exception as e:
+                    st.error(f"Error al escribir: {e}")

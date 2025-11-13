@@ -261,13 +261,23 @@ def save_layers_to_ws(ws):
     last_col = chr(ord("A") + len(HEADER) - 1)
     ws.update(f"A1:{last_col}{len(rows)}", rows)
 
+# ===== Carga controlada para evitar 429 (quota) =====
+@st.cache_resource(ttl=10, show_spinner=False)
+def load_sheet_once():
+    """
+    Solo se ejecuta 1 vez cada 10 segundos por sesión.
+    Evita saturar la cuota de lecturas de Google Sheets.
+    """
+    ws = ws_connect()
+    load_layers_from_ws(ws)
+    return ws
+
 # ---- Bootstrap persistente (al cargar la app) ----
 _sheets_ok = False
 ws0 = None
 try:
-    ws0 = ws_connect()
+    ws0 = load_sheet_once()
     _sheets_ok = True
-    loaded = load_layers_from_ws(ws0)
 except ModuleNotFoundError as e:
     st.warning(f"Faltan dependencias para Google Sheets ({e}). Instala 'google-auth' y 'gspread'.")
 except Exception as e:
@@ -296,7 +306,7 @@ BASEMAPS = {
         "attr": 'Tiles © Esri'
     },
     "Esri Gray (Light)": {
-        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{x}/{y}",
         "attr": 'Tiles © Esri'
     },
 }
@@ -324,7 +334,7 @@ for lname, meta in list(st.session_state.layers.items()):
         )
         if st.button("Eliminar capa", key=f"del_layer_{lname}"):
             del st.session_state.layers[lname]
-            if _sheets_ok:
+            if _sheets_ok and ws0 is not None:
                 try:
                     save_layers_to_ws(ws0)
                 except Exception as e:
@@ -341,7 +351,7 @@ with st.sidebar.expander("➕ Agregar capa"):
                 "visible": True,
                 "features": []
             }
-            if _sheets_ok:
+            if _sheets_ok and ws0 is not None:
                 try:
                     save_layers_to_ws(ws0)
                 except Exception as e:
@@ -473,7 +483,13 @@ with tab_mapa:
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    state = st_folium(m, height=640, key="mapa_main")
+    # MAPA MÁS GRANDE
+    state = st_folium(
+        m,
+        height=820,   # antes 640
+        width=1300,   # más ancho
+        key="mapa_main"
+    )
     click = state.get("last_clicked") if state else None
     if click:
         st.session_state.last_click = (float(click["lat"]), float(click["lng"]))
@@ -527,7 +543,7 @@ with tab_mapa:
             }
         )
         st.toast("Punto agregado.", icon="✅")
-        if _sheets_ok:
+        if _sheets_ok and ws0 is not None:
             try:
                 save_layers_to_ws(ws0)
             except Exception as e:
@@ -561,7 +577,7 @@ with tab_mapa:
                 )
                 if st.button("🗑️ Eliminar", key=f"btn_del_{lname}"):
                     st.session_state.layers[lname]["features"].pop(int(idx_del))
-                    if _sheets_ok:
+                    if _sheets_ok and ws0 is not None:
                         try:
                             save_layers_to_ws(ws0)
                         except Exception as e:
@@ -613,7 +629,7 @@ with tab_mapa:
                         "enlace": enl.strip(),
                         "desc": des.strip()
                     })
-                    if _sheets_ok:
+                    if _sheets_ok and ws0 is not None:
                         try:
                             save_layers_to_ws(ws0)
                         except Exception as e:
@@ -642,7 +658,7 @@ with tab_mapa:
             float(lon), float(lat)
         ]
         st.session_state.move_target = None
-        if _sheets_ok:
+        if _sheets_ok and ws0 is not None:
             try:
                 save_layers_to_ws(ws0)
             except Exception as e:

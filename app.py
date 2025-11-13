@@ -20,7 +20,7 @@ import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
-# --- ID de la hoja por defecto (la que ya usabas antes) ---
+# --- ID de la hoja por defecto (tu hoja) ---
 SHEET_ID_DEFAULT = "1jLq0TeCc6x2OXnWC2I_A4f1kwg5Zgfd665v5Bm9IYSw"
 WS_NAME_DEFAULT  = "casos_exito"
 
@@ -45,7 +45,10 @@ CR_CATALOG: Dict[str, List[str]] = {
 # ============== Config ==============
 st.set_page_config(page_title="Casos de Éxito – Mapas CR", layout="wide")
 st.title("🌟 Casos de Éxito – Mapas por capas (CR)")
-st.caption("Agrega puntos con clic + Confirmar. Edita, mueve, borra. Heatmap, dashboard y export. **Sheets es el almacenamiento** (auto-carga y auto-guardado).")
+st.caption(
+    "Agrega puntos con clic + Confirmar. Edita, mueve, borra. Heatmap, dashboard y export. "
+    "Sheets es el almacenamiento (auto-carga y auto-guardado)."
+)
 
 # ========= Estado base =========
 if "project_name" not in st.session_state:
@@ -63,10 +66,10 @@ if "last_click" not in st.session_state:
     st.session_state.last_click: Optional[tuple] = None
 
 # ========= Helpers comunes =========
-def _hex_ok(h):
+def _hex_ok(h: str) -> bool:
     return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 
-def _clean_hex(h):
+def _clean_hex(h: str) -> str:
     h = (h or "#1f77b4").strip()
     if not h.startswith("#"):
         h = "#" + h
@@ -76,44 +79,72 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 def feature_to_row(f: Dict[str, Any]) -> Dict[str, Any]:
-    p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
+    p = f["properties"]
+    lon, lat = f["geometry"]["coordinates"]
     return {
-        "id": p.get("id",""),
-        "Capa": p.get("layer",""),
-        "Título": p.get("titulo",""),
-        "Fecha": p.get("fecha",""),
-        "Resp": p.get("responsable",""),
-        "Provincia": p.get("provincia",""),
-        "Cantón": p.get("canton",""),
-        "Impacto": p.get("impacto",""),
-        "Evidencia": p.get("enlace",""),
-        "Lat": lat, "Lon": lon
+        "id": p.get("id", ""),
+        "Capa": p.get("layer", ""),
+        "Título": p.get("titulo", ""),
+        "Fecha": p.get("fecha", ""),
+        "Resp": p.get("responsable", ""),
+        "Provincia": p.get("provincia", ""),
+        "Cantón": p.get("canton", ""),
+        "Impacto": p.get("impacto", ""),
+        "Evidencia": p.get("enlace", ""),
+        "Lat": lat,
+        "Lon": lon,
     }
 
 def all_features_fc() -> Dict[str, Any]:
     feats = []
     for meta in st.session_state.layers.values():
         feats.extend(meta.get("features", []))
-    return {"type":"FeatureCollection","features":feats}
+    return {"type": "FeatureCollection", "features": feats}
 
 def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
     feats = fc["features"]
     if not feats:
         return gpd.GeoDataFrame(
-            columns=["id","layer","color","titulo","desc","fecha",
-                     "provincia","canton","responsable","impacto","enlace","geometry"],
-            geometry="geometry", crs="EPSG:4326"
+            columns=[
+                "id",
+                "layer",
+                "color",
+                "titulo",
+                "desc",
+                "fecha",
+                "provincia",
+                "canton",
+                "responsable",
+                "impacto",
+                "enlace",
+                "geometry",
+            ],
+            geometry="geometry",
+            crs="EPSG:4326",
         )
     rows = []
     for f in feats:
-        p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
+        p = f["properties"]
+        lon, lat = f["geometry"]["coordinates"]
         rows.append({**p, "geometry": Point(lon, lat)})
     return gpd.GeoDataFrame(rows, crs="EPSG:4326")
 
 # ========= Google Sheets (persistencia) =========
-HEADER = ["id","layer","color","titulo","desc","fecha",
-          "provincia","canton","responsable","impacto",
-          "enlace","lat","lon"]
+HEADER = [
+    "id",
+    "layer",
+    "color",
+    "titulo",
+    "desc",
+    "fecha",
+    "provincia",
+    "canton",
+    "responsable",
+    "impacto",
+    "enlace",
+    "lat",
+    "lon",
+]
 
 @st.cache_resource(show_spinner=False)
 def _get_gs_client_or_none():
@@ -124,15 +155,17 @@ def _get_gs_client_or_none():
         elif "gcp_service_account" in st.secrets:
             sa_info = dict(st.secrets["gcp_service_account"])
         else:
-            st.warning("No se encontró [google_service_account] ni [gcp_service_account] en secrets.toml")
+            st.warning(
+                "No se encontró [google_service_account] ni [gcp_service_account] en secrets.toml"
+            )
             return None
 
         creds = Credentials.from_service_account_info(
             sa_info,
             scopes=[
                 "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"
-            ]
+                "https://www.googleapis.com/auth/drive",
+            ],
         )
         return gspread.authorize(creds)
     except Exception as e:
@@ -148,20 +181,22 @@ def ws_connect():
         raise RuntimeError("Sin cliente de Google Sheets (revisa secrets).")
 
     sheet_id = (
-        st.secrets.get("SHEETS_SPREADSHEET_ID", "") or
-        os.getenv("SHEET_ID", "") or
-        SHEET_ID_DEFAULT
+        st.secrets.get("SHEETS_SPREADSHEET_ID", "")
+        or os.getenv("SHEETS_SPREADSHEET_ID", "")
+        or os.getenv("SHEET_ID", "")
+        or SHEET_ID_DEFAULT
     ).strip()
 
     if not sheet_id:
         raise RuntimeError(
-            "Falta SHEETS_SPREADSHEET_ID en secrets.toml o SHEET_ID / SHEET_ID_DEFAULT en el código."
+            "Falta SHEETS_SPREADSHEET_ID en secrets.toml o SHEET_ID / SHEETS_SPREADSHEET_ID en el entorno."
         )
 
     wsname = (
-        st.secrets.get("SHEETS_WORKSHEET_NAME", "") or
-        os.getenv("WS_NAME", "") or
-        WS_NAME_DEFAULT
+        st.secrets.get("SHEETS_WORKSHEET_NAME", "")
+        or os.getenv("SHEETS_WORKSHEET_NAME", "")
+        or os.getenv("WS_NAME", "")
+        or WS_NAME_DEFAULT
     ).strip()
 
     try:
@@ -194,8 +229,21 @@ def load_layers_from_ws(ws):
     for r in values[1:]:
         if not r or len(r) < len(HEADER):
             continue
-        (_id, layer, color, titulo, desc, fecha,
-         provincia, canton, resp, impacto, enlace, lat, lon) = r[:len(HEADER)]
+        (
+            _id,
+            layer,
+            color,
+            titulo,
+            desc,
+            fecha,
+            provincia,
+            canton,
+            resp,
+            impacto,
+            enlace,
+            lat,
+            lon,
+        ) = r[: len(HEADER)]
 
         color = _clean_hex(color or "#1f77b4")
         feat = {
@@ -211,12 +259,9 @@ def load_layers_from_ws(ws):
                 "canton": str(canton or ""),
                 "responsable": str(resp or ""),
                 "impacto": str(impacto or ""),
-                "enlace": str(enlace or "")
+                "enlace": str(enlace or ""),
             },
-            "geometry": {
-                "type": "Point",
-                "coordinates": [float(lon), float(lat)]
-            }
+            "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
         }
         if layer not in layers:
             layers[layer] = {"color": color, "visible": True, "features": []}
@@ -228,21 +273,25 @@ def rows_from_layers() -> List[List[Any]]:
     rows = [HEADER]
     for meta in st.session_state.layers.values():
         for f in meta.get("features", []):
-            p = f["properties"]; lon, lat = f["geometry"]["coordinates"]
-            rows.append([
-                p.get("id",""),
-                p.get("layer",""),
-                p.get("color",""),
-                p.get("titulo",""),
-                p.get("desc",""),
-                p.get("fecha",""),
-                p.get("provincia",""),
-                p.get("canton",""),
-                p.get("responsable",""),
-                p.get("impacto",""),
-                p.get("enlace",""),
-                lat, lon
-            ])
+            p = f["properties"]
+            lon, lat = f["geometry"]["coordinates"]
+            rows.append(
+                [
+                    p.get("id", ""),
+                    p.get("layer", ""),
+                    p.get("color", ""),
+                    p.get("titulo", ""),
+                    p.get("desc", ""),
+                    p.get("fecha", ""),
+                    p.get("provincia", ""),
+                    p.get("canton", ""),
+                    p.get("responsable", ""),
+                    p.get("impacto", ""),
+                    p.get("enlace", ""),
+                    lat,
+                    lon,
+                ]
+            )
     return rows
 
 def save_layers_to_ws(ws):
@@ -251,7 +300,7 @@ def save_layers_to_ws(ws):
     last_col = chr(ord("A") + len(HEADER) - 1)
     ws.update(f"A1:{last_col}{len(rows)}", rows)
 
-# ===== Carga controlada para evitar 429 (quota) =====
+# ===== Carga controlada =====
 @st.cache_resource(ttl=10, show_spinner=False)
 def load_sheet_once():
     """Solo se ejecuta 1 vez cada 10 segundos por sesión."""
@@ -273,50 +322,41 @@ except Exception as e:
 # ========= Sidebar =========
 st.sidebar.header("Proyecto")
 st.session_state.project_name = st.sidebar.text_input(
-    "Nombre del proyecto",
-    st.session_state.project_name,
-    key="proj_name"
+    "Nombre del proyecto", st.session_state.project_name, key="proj_name"
 )
 
 st.sidebar.header("Mapa base")
 BASEMAPS = {
     "OSM Estándar": {
         "tiles": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        "attr": '&copy; OpenStreetMap contributors'
+        "attr": "&copy; OpenStreetMap contributors",
     },
     "Carto Claro": {
         "tiles": "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        "attr": '&copy; CARTO & OSM'
+        "attr": "&copy; CARTO & OSM",
     },
     "Esri Satélite": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "attr": 'Tiles © Esri'
+        "attr": "Tiles © Esri",
     },
     "Esri Gray (Light)": {
         "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{x}/{y}",
-        "attr": 'Tiles © Esri'
+        "attr": "Tiles © Esri",
     },
 }
 basemap_name = st.sidebar.selectbox(
-    "Elegir mapa base",
-    list(BASEMAPS.keys()),
-    index=0,
-    key="basemap"
+    "Elegir mapa base", list(BASEMAPS.keys()), index=0, key="basemap"
 )
 
 st.sidebar.header("Capas")
 for lname, meta in list(st.session_state.layers.items()):
     with st.sidebar.expander(lname, expanded=False):
         meta["visible"] = st.checkbox(
-            "Visible",
-            value=meta.get("visible", True),
-            key=f"vis_{lname}"
+            "Visible", value=meta.get("visible", True), key=f"vis_{lname}"
         )
         meta["color"] = _clean_hex(
             st.color_picker(
-                "Color",
-                value=meta.get("color", "#1f77b4"),
-                key=f"col_{lname}"
+                "Color", value=meta.get("color", "#1f77b4"), key=f"col_{lname}"
             )
         )
         if st.button("Eliminar capa", key=f"del_layer_{lname}"):
@@ -336,7 +376,7 @@ with st.sidebar.expander("➕ Agregar capa"):
             st.session_state.layers[new_name] = {
                 "color": _clean_hex(new_color),
                 "visible": True,
-                "features": []
+                "features": [],
             }
             if _sheets_ok and ws0 is not None:
                 try:
@@ -363,59 +403,65 @@ with tab_mapa:
     canton_sel = st.selectbox("Cantón", cantones, index=0, key="canton_map")
 
     st.subheader("📝 Ficha del caso para el próximo punto")
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         layer_active = st.selectbox(
-            "Capa activa",
-            list(st.session_state.layers.keys()),
-            key="layer_active"
+            "Capa activa", list(st.session_state.layers.keys()), key="layer_active"
         )
     with c2:
-        titulo = st.text_input("Título", "Parque recuperado y seguro", key="titulo_map")
+        titulo = st.text_input(
+            "Título", "Parque recuperado y seguro", key="titulo_map"
+        )
     with c3:
         fecha = st.date_input("Fecha", key="fecha_map")
     with c4:
-        responsable = st.selectbox("Responsable", ["GL","FP","Mixta"], key="resp_map")
+        responsable = st.selectbox("Responsable", ["GL", "FP", "Mixta"], key="resp_map")
     desc = st.text_area(
         "Descripción (máx. 240)",
         "Rehabilitación de iluminación y mobiliario; patrullajes.",
-        key="desc_map"
+        key="desc_map",
     )[:240]
 
-    d2a, d2b, d2c = st.columns([1,1,1])
+    d2a, d2b, d2c = st.columns([1, 1, 1])
     prov_guardar = "San José" if provincia_sel == "(todas)" else provincia_sel
     cant_list = CR_CATALOG.get(prov_guardar, [])
-    cant_guardar = (canton_sel if canton_sel != "(todos)"
-                    else (cant_list[0] if cant_list else ""))
+    cant_guardar = (
+        canton_sel if canton_sel != "(todos)" else (cant_list[0] if cant_list else "")
+    )
     with d2a:
-        st.text_input("Provincia (auto)", value=prov_guardar, key="prov_auto", disabled=True)
+        st.text_input(
+            "Provincia (auto)", value=prov_guardar, key="prov_auto", disabled=True
+        )
     with d2b:
-        st.text_input("Cantón (auto)", value=cant_guardar, key="cant_auto", disabled=True)
+        st.text_input(
+            "Cantón (auto)", value=cant_guardar, key="cant_auto", disabled=True
+        )
     with d2c:
-        impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses", key="impacto_map")
-    enlace = st.text_input("Enlace a evidencia (opcional)", "", key="enlace_map")
+        impacto = st.text_input(
+            "Impacto (opcional)", "↓ 35% incidentes en 3 meses", key="impacto_map"
+        )
+    enlace = st.text_input(
+        "Enlace a evidencia (opcional)", "", key="enlace_map"
+    )
 
-    # ----- Mapa (igual que antes) -----
+    # ----- Mapa centrado en Costa Rica -----
     m = folium.Map(location=[9.94, -84.10], zoom_start=7, control_scale=True)
     bm = BASEMAPS[basemap_name]
     folium.TileLayer(
-        tiles=bm["tiles"],
-        name=basemap_name,
-        attr=bm["attr"],
-        control=False
+        tiles=bm["tiles"], name=basemap_name, attr=bm["attr"], control=False
     ).add_to(m)
     for nm, cfg in BASEMAPS.items():
         if nm != basemap_name:
             folium.TileLayer(
-                tiles=cfg["tiles"],
-                name=nm,
-                attr=cfg["attr"],
-                control=True
+                tiles=cfg["tiles"], name=nm, attr=cfg["attr"], control=True
             ).add_to(m)
     folium.plugins.Fullscreen(position="topleft").add_to(m)
     m.add_child(MiniMap(toggle_display=True))
-    m.add_child(MeasureControl(primary_length_unit="meters",
-                               secondary_length_unit="kilometers"))
+    m.add_child(
+        MeasureControl(
+            primary_length_unit="meters", secondary_length_unit="kilometers"
+        )
+    )
     folium.LatLngPopup().add_to(m)
 
     def pass_filter(p: Dict[str, Any]) -> bool:
@@ -435,14 +481,15 @@ with tab_mapa:
             p = f["properties"]
             if not pass_filter(p):
                 continue
-            lon, lat = f["geometry"]["coordinates"]; lat, lon = float(lat), float(lon)
+            lon, lat = f["geometry"]["coordinates"]
+            lat, lon = float(lat), float(lon)
             icon = BeautifyIcon(
                 icon="circle",
                 icon_shape="marker",
                 text_color="white",
                 background_color=color,
                 border_color=color,
-                spin=False
+                spin=False,
             )
             html = f"""<b>{p.get('titulo','(sin título)')}</b><br>
             <i>{p.get('fecha','')}</i><br>
@@ -453,8 +500,8 @@ with tab_mapa:
             folium.Marker(
                 [lat, lon],
                 icon=icon,
-                tooltip=p.get('titulo','(Caso)'),
-                popup=folium.Popup(html, max_width=320)
+                tooltip=p.get("titulo", "(Caso)"),
+                popup=folium.Popup(html, max_width=320),
             ).add_to(fg)
             heat_points.append([lat, lon, 1])
         fg.add_to(m)
@@ -466,12 +513,12 @@ with tab_mapa:
             radius=25,
             blur=25,
             min_opacity=0.3,
-            name="Heatmap"
+            name="Heatmap",
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # 👉 igual que antes: solo height, sin width
-    state = st_folium(m, height=640, key="mapa_main")
+    # Mapa grande, responsive
+    state = st_folium(m, height=700, key="mapa_main")
 
     click = state.get("last_clicked") if state else None
     if click:
@@ -488,13 +535,13 @@ with tab_mapa:
         add_ok = st.button(
             "➕ Confirmar agregar punto aquí",
             key="btn_add",
-            disabled=(st.session_state.last_click is None)
+            disabled=(st.session_state.last_click is None),
         )
     with cC:
         if st.button(
             "🧹 Limpiar selección de clic",
             key="btn_clear",
-            disabled=(st.session_state.last_click is None)
+            disabled=(st.session_state.last_click is None),
         ):
             st.session_state.last_click = None
             st.rerun()
@@ -513,7 +560,7 @@ with tab_mapa:
             "canton": cant_guardar,
             "responsable": responsable,
             "impacto": impacto.strip(),
-            "enlace": enlace.strip()
+            "enlace": enlace.strip(),
         }
         st.session_state.layers[layer_active]["features"].append(
             {
@@ -521,8 +568,8 @@ with tab_mapa:
                 "properties": props,
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [float(lon), float(lat)]
-                }
+                    "coordinates": [float(lon), float(lat)],
+                },
             }
         )
         st.toast("Punto agregado.", icon="✅")
@@ -555,8 +602,11 @@ with tab_mapa:
             with c1:
                 idx_del = st.number_input(
                     "Eliminar (índice)",
-                    0, len(feats)-1, 0, 1,
-                    key=f"idx_del_{lname}"
+                    0,
+                    len(feats) - 1,
+                    0,
+                    1,
+                    key=f"idx_del_{lname}",
                 )
                 if st.button("🗑️ Eliminar", key=f"btn_del_{lname}"):
                     st.session_state.layers[lname]["features"].pop(int(idx_del))
@@ -570,48 +620,69 @@ with tab_mapa:
                 st.markdown("**Editar atributos**")
                 ied = st.number_input(
                     "Índice",
-                    0, len(feats)-1, 0, 1,
-                    key=f"idx_edit_{lname}"
+                    0,
+                    len(feats) - 1,
+                    0,
+                    1,
+                    key=f"idx_edit_{lname}",
                 )
-                f = feats[int(ied)]; p = f["properties"]
+                f = feats[int(ied)]
+                p = f["properties"]
                 with st.form(f"form_edit_{lname}"):
-                    t = st.text_input("Título", p.get("titulo",""), key=f"t_{lname}")
+                    t = st.text_input("Título", p.get("titulo", ""), key=f"t_{lname}")
                     fe = st.date_input(
                         "Fecha",
                         value=pd.to_datetime(
                             p.get("fecha", dt.date.today())
                         ).date(),
-                        key=f"fe_{lname}"
+                        key=f"fe_{lname}",
                     )
                     resp = st.selectbox(
-                        "Responsable", ["GL","FP","Mixta"],
-                        index=["GL","FP","Mixta"].index(p.get("responsable","GL")),
-                        key=f"resp_{lname}"
+                        "Responsable",
+                        ["GL", "FP", "Mixta"],
+                        index=["GL", "FP", "Mixta"].index(
+                            p.get("responsable", "GL")
+                        ),
+                        key=f"resp_{lname}",
                     )
                     provs_edit = list(CR_CATALOG.keys())
-                    prov_idx = (provs_edit.index(p.get("provincia","San José"))
-                                if p.get("provincia","San José") in provs_edit
-                                else 0)
-                    prov = st.selectbox("Provincia", provs_edit, index=prov_idx, key=f"prov_{lname}")
+                    prov_idx = (
+                        provs_edit.index(p.get("provincia", "San José"))
+                        if p.get("provincia", "San José") in provs_edit
+                        else 0
+                    )
+                    prov = st.selectbox(
+                        "Provincia", provs_edit, index=prov_idx, key=f"prov_{lname}"
+                    )
                     clist = CR_CATALOG.get(prov, [])
                     cval = p.get("canton", clist[0] if clist else "")
                     cint = clist.index(cval) if cval in clist else 0
-                    cant = st.selectbox("Cantón", clist, index=cint, key=f"cant_{lname}")
-                    imp = st.text_input("Impacto", p.get("impacto",""), key=f"imp_{lname}")
-                    enl = st.text_input("Enlace", p.get("enlace",""), key=f"enl_{lname}")
-                    des = st.text_area("Descripción", p.get("desc",""), key=f"des_{lname}")
+                    cant = st.selectbox(
+                        "Cantón", clist, index=cint, key=f"cant_{lname}"
+                    )
+                    imp = st.text_input(
+                        "Impacto", p.get("impacto", ""), key=f"imp_{lname}"
+                    )
+                    enl = st.text_input(
+                        "Enlace", p.get("enlace", ""), key=f"enl_{lname}"
+                    )
+                    des = st.text_area(
+                        "Descripción", p.get("desc", ""), key=f"des_{lname}"
+                    )
                     ok = st.form_submit_button("💾 Guardar")
                 if ok:
-                    p.update({
-                        "titulo": t.strip(),
-                        "fecha": str(fe),
-                        "responsable": resp,
-                        "provincia": prov,
-                        "canton": cant,
-                        "impacto": imp.strip(),
-                        "enlace": enl.strip(),
-                        "desc": des.strip()
-                    })
+                    p.update(
+                        {
+                            "titulo": t.strip(),
+                            "fecha": str(fe),
+                            "responsable": resp,
+                            "provincia": prov,
+                            "canton": cant,
+                            "impacto": imp.strip(),
+                            "enlace": enl.strip(),
+                            "desc": des.strip(),
+                        }
+                    )
                     if _sheets_ok and ws0 is not None:
                         try:
                             save_layers_to_ws(ws0)
@@ -623,8 +694,11 @@ with tab_mapa:
                 st.markdown("**Mover ubicación**")
                 imv = st.number_input(
                     "Índice",
-                    0, len(feats)-1, 0, 1,
-                    key=f"idx_move_{lname}"
+                    0,
+                    len(feats) - 1,
+                    0,
+                    1,
+                    key=f"idx_move_{lname}",
                 )
                 if st.button("🔀 Activar mover por clic", key=f"btn_move_{lname}"):
                     st.session_state.move_target = (lname, int(imv))
@@ -635,10 +709,12 @@ with tab_mapa:
 
     # Aplicar movimiento si hay target y un clic nuevo
     if st.session_state.move_target and state and state.get("last_clicked"):
-        lat = state["last_clicked"]["lat"]; lon = state["last_clicked"]["lng"]
+        lat = state["last_clicked"]["lat"]
+        lon = state["last_clicked"]["lng"]
         lname, idx = st.session_state.move_target
         st.session_state.layers[lname]["features"][idx]["geometry"]["coordinates"] = [
-            float(lon), float(lat)
+            float(lon),
+            float(lat),
         ]
         st.session_state.move_target = None
         if _sheets_ok and ws0 is not None:
@@ -658,16 +734,19 @@ with tab_dashboard:
         st.subheader("Filtros")
         capas = sorted(df["Capa"].unique().tolist())
         capa_f = st.multiselect("Capas", capas, default=capas, key="capas_dash")
-        prov_f = st.selectbox("Provincia", ["(todas)"] + list(CR_CATALOG.keys()), 0, key="prov_dash")
+        prov_f = st.selectbox(
+            "Provincia", ["(todas)"] + list(CR_CATALOG.keys()), 0, key="prov_dash"
+        )
         cant_f = st.selectbox(
             "Cantón",
-            ["(todos)"] + (
+            ["(todos)"]
+            + (
                 CR_CATALOG.get(prov_f, [])
                 if prov_f != "(todas)"
                 else sorted({c for v in CR_CATALOG.values() for c in v})
             ),
             0,
-            key="cant_dash"
+            key="cant_dash",
         )
         fdf = df[df["Capa"].isin(capa_f)].copy()
         if prov_f != "(todas)":
@@ -685,9 +764,7 @@ with tab_dashboard:
             )
         with c2:
             st.markdown("**GL/FP/Mixta**")
-            st.bar_chart(
-                fdf.groupby("Resp")["Título"].count()
-            )
+            st.bar_chart(fdf.groupby("Resp")["Título"].count())
         c3, c4 = st.columns(2)
         with c3:
             st.markdown("**Por provincia**")
@@ -696,9 +773,7 @@ with tab_dashboard:
             )
         with c4:
             st.markdown("**Serie mensual**")
-            st.line_chart(
-                fdf.groupby("Año-Mes")["Título"].count()
-            )
+            st.line_chart(fdf.groupby("Año-Mes")["Título"].count())
         st.divider()
         st.markdown("**Tabla (filtrada)**")
         st.dataframe(fdf, use_container_width=True)
@@ -715,10 +790,10 @@ with tab_export:
     def _csv_bytes():
         if gdf.empty:
             return b""
-        df = pd.DataFrame(gdf.drop(columns="geometry"))
-        df["lat"] = gdf.geometry.y
-        df["lon"] = gdf.geometry.x
-        return df.to_csv(index=False).encode("utf-8")
+        df_exp = pd.DataFrame(gdf.drop(columns="geometry"))
+        df_exp["lat"] = gdf.geometry.y
+        df_exp["lon"] = gdf.geometry.x
+        return df_exp.to_csv(index=False).encode("utf-8")
 
     def _shp_zip():
         if gdf.empty:
@@ -740,7 +815,7 @@ with tab_export:
             data=_geojson_bytes(),
             file_name=f"{st.session_state.project_name}.geojson",
             mime="application/geo+json",
-            disabled=(len(fc['features']) == 0)
+            disabled=(len(fc["features"]) == 0),
         )
     with c2:
         st.download_button(
@@ -748,7 +823,7 @@ with tab_export:
             data=_shp_zip(),
             file_name=f"{st.session_state.project_name}.zip",
             mime="application/zip",
-            disabled=(len(fc['features']) == 0)
+            disabled=(len(fc["features"]) == 0),
         )
     with c3:
         st.download_button(
@@ -756,7 +831,7 @@ with tab_export:
             data=_csv_bytes(),
             file_name=f"{st.session_state.project_name}.csv",
             mime="text/csv",
-            disabled=(len(fc['features']) == 0)
+            disabled=(len(fc["features"]) == 0),
         )
 
 # ========= 📡 GOOGLE SHEETS (panel visible) =========

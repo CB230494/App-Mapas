@@ -142,16 +142,6 @@ def _get_gs_client_or_none():
 def ws_connect():
     """
     Abre o crea la hoja, garantizando encabezados == HEADER.
-
-    Prioridad para el ID de la hoja:
-    1) st.secrets["SHEETS_SPREADSHEET_ID"]
-    2) os.getenv("SHEET_ID")
-    3) SHEET_ID_DEFAULT
-
-    Para el nombre de la hoja:
-    1) st.secrets["SHEETS_WORKSHEET_NAME"]
-    2) os.getenv("WS_NAME")
-    3) WS_NAME_DEFAULT
     """
     gc = _get_gs_client_or_none()
     if gc is None:
@@ -264,10 +254,7 @@ def save_layers_to_ws(ws):
 # ===== Carga controlada para evitar 429 (quota) =====
 @st.cache_resource(ttl=10, show_spinner=False)
 def load_sheet_once():
-    """
-    Solo se ejecuta 1 vez cada 10 segundos por sesión.
-    Evita saturar la cuota de lecturas de Google Sheets.
-    """
+    """Solo se ejecuta 1 vez cada 10 segundos por sesión."""
     ws = ws_connect()
     load_layers_from_ws(ws)
     return ws
@@ -408,7 +395,7 @@ with tab_mapa:
         impacto = st.text_input("Impacto (opcional)", "↓ 35% incidentes en 3 meses", key="impacto_map")
     enlace = st.text_input("Enlace a evidencia (opcional)", "", key="enlace_map")
 
-    # ----- Mapa -----
+    # ----- Mapa (igual que antes) -----
     m = folium.Map(location=[9.94, -84.10], zoom_start=7, control_scale=True)
     bm = BASEMAPS[basemap_name]
     folium.TileLayer(
@@ -483,12 +470,9 @@ with tab_mapa:
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    state = st_folium(
-        m,
-        height=820,
-        width=1300,
-        key="mapa_main"
-    )
+    # 👉 igual que antes: solo height, sin width
+    state = st_folium(m, height=640, key="mapa_main")
+
     click = state.get("last_clicked") if state else None
     if click:
         st.session_state.last_click = (float(click["lat"]), float(click["lng"]))

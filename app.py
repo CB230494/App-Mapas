@@ -63,7 +63,7 @@ if "last_click" not in st.session_state:
     st.session_state.last_click: Optional[tuple] = None
 
 # ========= Helpers comunes =========
-def _hex_ok(h): 
+def _hex_ok(h):
     return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
 
 def _clean_hex(h):
@@ -483,11 +483,10 @@ with tab_mapa:
         ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # MAPA MÁS GRANDE
     state = st_folium(
         m,
-        height=820,   # antes 640
-        width=1300,   # más ancho
+        height=820,
+        width=1300,
         key="mapa_main"
     )
     click = state.get("last_clicked") if state else None

@@ -15,10 +15,14 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap, MeasureControl, MiniMap, BeautifyIcon
 
-# --- Google Sheets robusto (basado en la otra app) ---
+# --- Google Sheets robusto ---
 import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
+
+# --- ID de la hoja por defecto (la que ya usabas antes) ---
+SHEET_ID_DEFAULT = "1jLq0TeCc6x2OXnWC2I_A4f1kwg5Zgfd665v5Bm9IYSw"
+WS_NAME_DEFAULT  = "casos_exito"
 
 # ============== Catálogo CR ==============
 CR_CATALOG: Dict[str, List[str]] = {
@@ -61,10 +65,13 @@ if "last_click" not in st.session_state:
 # ========= Helpers comunes =========
 def _hex_ok(h): 
     return bool(re.fullmatch(r"#?[0-9a-fA-F]{6}", (h or "").strip()))
+
 def _clean_hex(h):
     h = (h or "#1f77b4").strip()
-    if not h.startswith("#"): h = "#" + h
+    if not h.startswith("#"):
+        h = "#" + h
     return h if _hex_ok(h) else "#1f77b4"
+
 def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -104,19 +111,13 @@ def gdf_from_fc(fc: Dict[str, Any]) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(rows, crs="EPSG:4326")
 
 # ========= Google Sheets (persistencia) =========
-# Esquema de esta app
 HEADER = ["id","layer","color","titulo","desc","fecha",
           "provincia","canton","responsable","impacto",
           "enlace","lat","lon"]
 
-# ---- Cliente robusto (tomado de la otra app y adaptado) ----
 @st.cache_resource(show_spinner=False)
 def _get_gs_client_or_none():
-    """
-    Intenta autorizar un cliente de Google Sheets usando:
-    - st.secrets["google_service_account"]  o
-    - st.secrets["gcp_service_account"]
-    """
+    """Cliente de Google Sheets usando secrets (google_service_account o gcp_service_account)."""
     try:
         if "google_service_account" in st.secrets:
             sa_info = dict(st.secrets["google_service_account"])
@@ -141,21 +142,37 @@ def _get_gs_client_or_none():
 def ws_connect():
     """
     Abre o crea la hoja, garantizando encabezados == HEADER.
-    Usa:
-    - st.secrets["SHEETS_SPREADSHEET_ID"] o os.getenv("SHEET_ID")
-    - st.secrets["SHEETS_WORKSHEET_NAME"] o os.getenv("WS_NAME", 'casos_exito')
+
+    Prioridad para el ID de la hoja:
+    1) st.secrets["SHEETS_SPREADSHEET_ID"]
+    2) os.getenv("SHEET_ID")
+    3) SHEET_ID_DEFAULT
+
+    Para el nombre de la hoja:
+    1) st.secrets["SHEETS_WORKSHEET_NAME"]
+    2) os.getenv("WS_NAME")
+    3) WS_NAME_DEFAULT
     """
     gc = _get_gs_client_or_none()
     if gc is None:
         raise RuntimeError("Sin cliente de Google Sheets (revisa secrets).")
 
-    sheet_id = (st.secrets.get("SHEETS_SPREADSHEET_ID","") or
-                os.getenv("SHEET_ID","")).strip()
-    if not sheet_id:
-        raise RuntimeError("Falta SHEETS_SPREADSHEET_ID en secrets.toml o SHEET_ID en variables de entorno.")
+    sheet_id = (
+        st.secrets.get("SHEETS_SPREADSHEET_ID", "") or
+        os.getenv("SHEET_ID", "") or
+        SHEET_ID_DEFAULT
+    ).strip()
 
-    wsname = (st.secrets.get("SHEETS_WORKSHEET_NAME","") or
-              os.getenv("WS_NAME","casos_exito")).strip()
+    if not sheet_id:
+        raise RuntimeError(
+            "Falta SHEETS_SPREADSHEET_ID en secrets.toml o SHEET_ID / SHEET_ID_DEFAULT en el código."
+        )
+
+    wsname = (
+        st.secrets.get("SHEETS_WORKSHEET_NAME", "") or
+        os.getenv("WS_NAME", "") or
+        WS_NAME_DEFAULT
+    ).strip()
 
     try:
         sh = gc.open_by_key(sheet_id)
@@ -169,11 +186,11 @@ def ws_connect():
         hdr = [h.strip().lower() for h in ws.row_values(1)]
         if hdr != [h.lower() for h in HEADER]:
             ws.resize(rows=max(2, ws.row_count), cols=len(HEADER))
-            # Actualiza solo la primera fila
             last_col = chr(ord("A") + len(HEADER) - 1)
             ws.update(f"A1:{last_col}1", [HEADER])
 
         return ws
+
     except APIError as e:
         raise RuntimeError(f"No se puede acceder a la Hoja (permiso/ID). {e}")
     except Exception as e:
@@ -184,7 +201,6 @@ def load_layers_from_ws(ws):
     if not values or len(values) <= 1:
         return False
     layers: Dict[str, Dict[str, Any]] = {}
-    # Ajuste: asegurar fila tiene al menos tantas columnas como HEADER
     for r in values[1:]:
         if not r or len(r) < len(HEADER):
             continue
@@ -242,7 +258,6 @@ def rows_from_layers() -> List[List[Any]]:
 def save_layers_to_ws(ws):
     rows = rows_from_layers()
     ws.clear()
-    # Asegurar que se escribe desde A1 la matriz completa
     last_col = chr(ord("A") + len(HEADER) - 1)
     ws.update(f"A1:{last_col}{len(rows)}", rows)
 
@@ -252,7 +267,7 @@ ws0 = None
 try:
     ws0 = ws_connect()
     _sheets_ok = True
-    loaded = load_layers_from_ws(ws0)  # si había datos, los carga
+    loaded = load_layers_from_ws(ws0)
 except ModuleNotFoundError as e:
     st.warning(f"Faltan dependencias para Google Sheets ({e}). Instala 'google-auth' y 'gspread'.")
 except Exception as e:

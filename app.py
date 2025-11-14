@@ -301,9 +301,9 @@ def save_layers_to_ws(ws):
     ws.update(f"A1:{last_col}{len(rows)}", rows)
 
 # ===== Carga controlada =====
-@st.cache_resource(ttl=10, show_spinner=False)
+@st.cache_resource(ttl=120, show_spinner=False)
 def load_sheet_once():
-    """Solo se ejecuta 1 vez cada 10 segundos por sesión."""
+    """Solo se ejecuta 1 vez cada 120 segundos por sesión (reduce lecturas)."""
     ws = ws_connect()
     load_layers_from_ws(ws)
     return ws
@@ -839,22 +839,28 @@ with tab_sheets:
     st.subheader("Estado de conexión")
     if _sheets_ok and ws0 is not None:
         try:
-            ws = ws_connect()
+            # Usamos la misma hoja ya abierta/cargada (ws0) para no forzar lecturas extras
+            ws = ws0
             st.success(f"✅ Conectado • Hoja: {ws.title}")
-            vals = ws.get_all_values()
-            st.info(f"📄 Filas actuales (incluye encabezado): {len(vals)}")
-            c1, c2 = st.columns(2)
+
+            c1, c2, c3 = st.columns(3)
             with c1:
+                if st.button("📄 Contar filas de la hoja"):
+                    # Esta lectura solo se hace si tú la pides
+                    vals = ws.get_all_values()
+                    st.info(f"📄 Filas actuales (incluye encabezado): {len(vals)}")
+
+            with c2:
                 if st.button("⬇️ Forzar cargar desde Sheets"):
                     if load_layers_from_ws(ws):
-                        st.success("Datos cargados.")
+                        st.success("Datos cargados desde Sheets.")
                         st.rerun()
                     else:
                         st.info("La hoja está vacía (sólo encabezado).")
-            with c2:
+            with c3:
                 if st.button("⬆️ Forzar subir (reemplazar hoja)"):
                     save_layers_to_ws(ws)
-                    st.success("Datos subidos.")
+                    st.success("Datos subidos a Sheets.")
         except Exception as e:
             st.error(f"No se pudo abrir la hoja: {e}")
     else:

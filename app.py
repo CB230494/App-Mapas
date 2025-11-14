@@ -46,8 +46,8 @@ CR_CATALOG: Dict[str, List[str]] = {
 st.set_page_config(page_title="Casos de Éxito – Mapas CR", layout="wide")
 st.title("🌟 Casos de Éxito – Mapas por capas (CR)")
 st.caption(
-    "Agrega puntos con clic + Confirmar. Edita, mueve, borra. Heatmap, dashboard y export. "
-    "Sheets es el almacenamiento (auto-carga y auto-guardado)."
+    "Agrega puntos con clic + Confirmar o desde el formulario. Edita, mueve, borra. "
+    "Heatmap, dashboard y export. Sheets es el almacenamiento (auto-carga y auto-guardado)."
 )
 
 # ========= Estado base =========
@@ -64,6 +64,12 @@ if "move_target" not in st.session_state:
     st.session_state.move_target: Optional[tuple] = None
 if "last_click" not in st.session_state:
     st.session_state.last_click: Optional[tuple] = None
+
+# coordenadas para la pestaña Registrar
+if "reg_lat" not in st.session_state:
+    st.session_state.reg_lat = 0.0
+if "reg_lon" not in st.session_state:
+    st.session_state.reg_lon = 0.0
 
 # ========= Helpers comunes =========
 def _hex_ok(h: str) -> bool:
@@ -386,9 +392,134 @@ with st.sidebar.expander("➕ Agregar capa"):
             st.rerun()
 
 # ========= Tabs =========
-tab_mapa, tab_dashboard, tab_export, tab_sheets = st.tabs(
-    ["🗺️ Mapa", "📊 Dashboard", "📤 Exportar", "📡 Google Sheets"]
+tab_registro, tab_mapa, tab_dashboard, tab_export, tab_sheets = st.tabs(
+    ["📝 Registrar", "🗺️ Mapa", "📊 Dashboard", "📤 Exportar", "📡 Google Sheets"]
 )
+
+# ========= 📝 REGISTRAR =========
+with tab_registro:
+    st.subheader("Registrar nuevo caso de éxito")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        titulo_reg = st.text_input("Título del caso")
+        desc_reg = st.text_area("Descripción")
+        etiquetas_reg = st.text_input("Etiquetas (coma separadas)", "operativo, comunidad, ...")
+        url_reg = st.text_input("URL de evidencia (opcional)", "")
+    with c2:
+        impacto_reg = st.selectbox("Impacto", ["Bajo", "Medio", "Alto"], index=2)
+        estado_reg = st.selectbox("Estado", ["Activo", "En planificación", "Finalizado"], index=0)
+        fecha_reg = st.date_input("Fecha del evento", dt.date.today())
+        responsable_reg = st.selectbox("Responsable", ["GL", "FP", "Mixta"], index=0)
+        capa_reg = st.selectbox("Capa / Tipo de caso", list(st.session_state.layers.keys()))
+
+    c3, c4, c5 = st.columns(3)
+    with c3:
+        provincia_reg = st.selectbox("Provincia", list(CR_CATALOG.keys()))
+    with c4:
+        cantones_reg = CR_CATALOG.get(provincia_reg, [])
+        if cantones_reg:
+            canton_reg = st.selectbox("Cantón", cantones_reg)
+        else:
+            canton_reg = st.text_input("Cantón", "")
+    with c5:
+        distrito_reg = st.text_input("Distrito (opcional)", "")
+
+    st.markdown("### Georreferenciación")
+
+    # Mapa para registro – primero el mapa, luego los campos de lat/lon
+    m_reg = folium.Map(location=[9.94, -84.10], zoom_start=7, control_scale=True)
+    folium.TileLayer(
+        tiles=BASEMAPS["OSM Estándar"]["tiles"],
+        attr=BASEMAPS["OSM Estándar"]["attr"],
+        name="OSM",
+        control=False,
+    ).add_to(m_reg)
+    folium.LatLngPopup().add_to(m_reg)
+    MiniMap(toggle_display=True).add_to(m_reg)
+
+    state_reg = st_folium(m_reg, height=400, key="map_registro")
+
+    if state_reg and state_reg.get("last_clicked"):
+        st.session_state.reg_lat = float(state_reg["last_clicked"]["lat"])
+        st.session_state.reg_lon = float(state_reg["last_clicked"]["lng"])
+
+    c_lat, c_lon = st.columns(2)
+    with c_lat:
+        st.session_state.reg_lat = st.number_input(
+            "Latitud", value=float(st.session_state.reg_lat), format="%.8f", key="reg_lat"
+        )
+    with c_lon:
+        st.session_state.reg_lon = st.number_input(
+            "Longitud", value=float(st.session_state.reg_lon), format="%.8f", key="reg_lon"
+        )
+
+    st.markdown("")
+
+    if st.button("➕ Guardar caso", type="primary"):
+        if not titulo_reg.strip():
+            st.error("El título es obligatorio.")
+        elif st.session_state.reg_lat == 0.0 and st.session_state.reg_lon == 0.0:
+            st.error("Selecciona una ubicación en el mapa (latitud/longitud distinta de 0).")
+        else:
+            color_reg = _clean_hex(st.session_state.layers[capa_reg]["color"])
+            desc_completa = desc_reg.strip()
+            if distrito_reg.strip():
+                desc_completa += f"\nDistrito: {distrito_reg.strip()}"
+            if etiquetas_reg.strip():
+                desc_completa += f"\nEtiquetas: {etiquetas_reg.strip()}"
+            desc_completa += f"\nEstado: {estado_reg}"
+
+            props = {
+                "id": _new_id(),
+                "layer": capa_reg,
+                "color": color_reg,
+                "titulo": titulo_reg.strip(),
+                "desc": desc_completa,
+                "fecha": str(fecha_reg),
+                "provincia": provincia_reg,
+                "canton": canton_reg,
+                "responsable": responsable_reg,
+                "impacto": impacto_reg,
+                "enlace": url_reg.strip(),
+            }
+            feat = {
+                "type": "Feature",
+                "properties": props,
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [float(st.session_state.reg_lon), float(st.session_state.reg_lat)],
+                },
+            }
+            st.session_state.layers[capa_reg]["features"].append(feat)
+            st.success("Caso guardado en la sesión.")
+
+            if _sheets_ok and ws0 is not None:
+                try:
+                    save_layers_to_ws(ws0)
+                    st.toast("Guardado también en Google Sheets.", icon="✅")
+                except Exception as e:
+                    st.toast(f"No se pudo guardar en Sheets: {e}", icon="🟠")
+
+    st.divider()
+    st.subheader("Registros (vista rápida)")
+
+    df_quick = pd.DataFrame([feature_to_row(f) for f in all_features_fc()["features"]])
+    if df_quick.empty:
+        st.info("No hay registros. Crea el primero con el formulario.")
+    else:
+        st.dataframe(df_quick.tail(100), use_container_width=True)
+
+    if st.button("🔄 Recargar datos desde Sheets"):
+        if _sheets_ok and ws0 is not None:
+            try:
+                load_layers_from_ws(ws0)
+                st.success("Datos recargados desde Google Sheets.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo recargar desde Sheets: {e}")
+        else:
+            st.error("No hay conexión a Google Sheets.")
 
 # ========= 🗺️ MAPA =========
 with tab_mapa:
@@ -402,7 +533,7 @@ with tab_mapa:
     )
     canton_sel = st.selectbox("Cantón", cantones, index=0, key="canton_map")
 
-    st.subheader("📝 Ficha del caso para el próximo punto")
+    st.subheader("📝 Ficha del caso para el próximo punto (clic en mapa)")
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         layer_active = st.selectbox(
@@ -546,7 +677,7 @@ with tab_mapa:
             st.session_state.last_click = None
             st.rerun()
 
-    # Agregar y guardar a Sheets
+    # Agregar y guardar a Sheets (modo mapa)
     if add_ok and st.session_state.last_click:
         lat, lon = st.session_state.last_click
         props = {
@@ -584,6 +715,7 @@ with tab_mapa:
     # ------- Gestión por capa (eliminar/editar/mover) -------
     st.divider()
     st.subheader("📋 Gestión por capas (eliminar / **editar / mover**)")
+
     subtabs = st.tabs(list(st.session_state.layers.keys()))
     for i, lname in enumerate(list(st.session_state.layers.keys())):
         with subtabs[i]:
@@ -839,26 +971,24 @@ with tab_sheets:
     st.subheader("Estado de conexión")
     if _sheets_ok and ws0 is not None:
         try:
-            # Usamos la misma hoja ya abierta/cargada (ws0) para no forzar lecturas extras
             ws = ws0
             st.success(f"✅ Conectado • Hoja: {ws.title}")
 
             c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("📄 Contar filas de la hoja"):
-                    # Esta lectura solo se hace si tú la pides
                     vals = ws.get_all_values()
                     st.info(f"📄 Filas actuales (incluye encabezado): {len(vals)}")
 
             with c2:
-                if st.button("⬇️ Forzar cargar desde Sheets"):
+                if st.button("⬇️ Forzar cargar desde Sheets (sobrescribe la sesión)"):
                     if load_layers_from_ws(ws):
                         st.success("Datos cargados desde Sheets.")
                         st.rerun()
                     else:
                         st.info("La hoja está vacía (sólo encabezado).")
             with c3:
-                if st.button("⬆️ Forzar subir (reemplazar hoja)"):
+                if st.button("⬆️ Forzar subir (reemplazar hoja en Sheets)"):
                     save_layers_to_ws(ws)
                     st.success("Datos subidos a Sheets.")
         except Exception as e:
